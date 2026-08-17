@@ -9,4 +9,7 @@ def test_launchd_webui_starts_quiet_agent_revision_watcher():
     assert 'XPC_SERVICE_NAME:-' in script
     assert 'com.parantoux.hermes-webui' in script
     assert '.hermes/scripts/webui-agent-update-watch.py' in script
-    assert 'while sleep 60' in script
+    assert 'HERMES_WEBUI_AGENT_WATCH_INTERVAL:-60' in script
+    assert 'ps -o lstart=' in script
+    assert '_hermes_server_started' in script
+    assert '_hermes_current_started' in script

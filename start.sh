@@ -175,9 +175,12 @@ if [[ "${XPC_SERVICE_NAME:-}" == "com.parantoux.hermes-webui" ]]; then
   _hermes_agent_watch="${HOME}/.hermes/scripts/webui-agent-update-watch.py"
   if [[ -x "${_hermes_agent_watch}" ]]; then
     _hermes_server_pid=$$
+    _hermes_server_started="$(ps -o lstart= -p "${_hermes_server_pid}" 2>/dev/null | xargs)"
+    _hermes_watch_interval="${HERMES_WEBUI_AGENT_WATCH_INTERVAL:-60}"
     (
-      while sleep 60; do
-        kill -0 "${_hermes_server_pid}" 2>/dev/null || exit 0
+      while sleep "${_hermes_watch_interval}"; do
+        _hermes_current_started="$(ps -o lstart= -p "${_hermes_server_pid}" 2>/dev/null | xargs)"
+        [[ -n "${_hermes_current_started}" && "${_hermes_current_started}" == "${_hermes_server_started}" ]] || exit 0
         "${_hermes_agent_watch}"
       done
     ) &

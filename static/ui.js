@@ -3814,13 +3814,24 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
   const matchingEntries=(entries||[]).filter(existing=>{
-    if(_normalizeConfiguredModelKey(existing.value)===normalized) return true;
+    if(_normalizeConfiguredModelKey(existing.value)===normalized){
+      const existingRaw=String(existing.value||'').trim().toLowerCase();
+      const candidateRaw=String(modelId||'').trim().toLowerCase();
+      // The generic key intentionally ignores one leading namespace for badge
+      // lookup, but equivalence cannot do that when both IDs are qualified:
+      // vendor-a/model and vendor-b/model are different models. Routed aliases
+      // are handled by the provider-aware comparison below.
+      if(!existingRaw.includes('/')||!candidateRaw.includes('/')||existingRaw===candidateRaw) return true;
+    }
     // Provider route and model vendor namespace are distinct dimensions. The
     // model ID deepseek-ai/DeepSeek-V4-Flash-0731 (provider wandb) and its
     // routed form wandb/deepseek-ai/DeepSeek-V4-Flash-0731 (or @wandb:...)
     // must dedup as the same configured entry even though the generic
     // normalizer strips a different first slash-segment from each. Strip the
-    // known provider route / @provider: prefix from both, then re-normalize.
+    // known provider route / @provider: prefix from both, then compare the
+    // remaining vendor-qualified IDs directly. Re-normalizing here would strip
+    // the vendor segment a second time and collapse vendor-a/model with
+    // vendor-b/model.
     const entryProvider=String(existing.providerId||'').toLowerCase();
     if(!entryProvider||(provider&&entryProvider!==provider)) return false;
     const _strip=_s=>{
@@ -3832,7 +3843,7 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
         if(lower.startsWith(at)) s=s.slice(at.length);
         else if(lower.startsWith(slash)) s=s.slice(slash.length);
       }
-      return _normalizeConfiguredModelKey(s);
+      return s.trim().toLowerCase().replace(/-/g,'.');
     };
     if(_strip(existing.value)===_strip(modelId)) return true;
     return false;

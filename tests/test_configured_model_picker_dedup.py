@@ -136,3 +136,20 @@ def test_vendor_qualified_model_and_provider_routed_form_deduplicate(tmp_path):
     )
 
     assert results == [True, True, True]
+
+
+def test_same_provider_does_not_collapse_distinct_vendor_namespaces(tmp_path):
+    entries = [{"value": "vendor-a/model", "providerId": "wandb"}]
+
+    results = _equivalent_cases(
+        tmp_path,
+        [
+            {
+                "modelId": "vendor-b/model",
+                "badge": {"provider": "wandb"},
+                "entries": entries,
+            }
+        ],
+    )
+
+    assert results == [False]
