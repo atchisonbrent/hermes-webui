@@ -104,3 +104,35 @@ def test_same_model_id_from_another_provider_remains_distinct(tmp_path):
     )
 
     assert results == [False, False]
+
+
+def test_vendor_qualified_model_and_provider_routed_form_deduplicate(tmp_path):
+    """A provider route must not be confused with the model vendor namespace."""
+    entries = [
+        {
+            "value": "deepseek-ai/DeepSeek-V4-Flash-0731",
+            "providerId": "wandb",
+        }
+    ]
+    results = _equivalent_cases(
+        tmp_path,
+        [
+            {
+                "modelId": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "badge": {"provider": "wandb"},
+                "entries": entries,
+            },
+            {
+                "modelId": "wandb/deepseek-ai/DeepSeek-V4-Flash-0731",
+                "badge": {"provider": "wandb"},
+                "entries": entries,
+            },
+            {
+                "modelId": "@wandb:deepseek-ai/DeepSeek-V4-Flash-0731",
+                "badge": {"provider": "wandb"},
+                "entries": entries,
+            },
+        ],
+    )
+
+    assert results == [True, True, True]

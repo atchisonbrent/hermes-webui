@@ -3813,9 +3813,30 @@ function _normalizeConfiguredModelKey(modelId){
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
-  const matchingEntries=(entries||[]).filter(existing=>
-    _normalizeConfiguredModelKey(existing.value)===normalized
-  );
+  const matchingEntries=(entries||[]).filter(existing=>{
+    if(_normalizeConfiguredModelKey(existing.value)===normalized) return true;
+    // Provider route and model vendor namespace are distinct dimensions. The
+    // model ID deepseek-ai/DeepSeek-V4-Flash-0731 (provider wandb) and its
+    // routed form wandb/deepseek-ai/DeepSeek-V4-Flash-0731 (or @wandb:...)
+    // must dedup as the same configured entry even though the generic
+    // normalizer strips a different first slash-segment from each. Strip the
+    // known provider route / @provider: prefix from both, then re-normalize.
+    const entryProvider=String(existing.providerId||'').toLowerCase();
+    if(!entryProvider||(provider&&entryProvider!==provider)) return false;
+    const _strip=_s=>{
+      let s=String(_s||'').trim();
+      const lower=s.toLowerCase();
+      if(entryProvider){
+        const at=`@${entryProvider}:`;
+        const slash=`${entryProvider}/`;
+        if(lower.startsWith(at)) s=s.slice(at.length);
+        else if(lower.startsWith(slash)) s=s.slice(slash.length);
+      }
+      return _normalizeConfiguredModelKey(s);
+    };
+    if(_strip(existing.value)===_strip(modelId)) return true;
+    return false;
+  });
   if(matchingEntries.some(existing=>{
     const entryProvider=String(existing.providerId||'').toLowerCase();
     return !provider||!entryProvider||entryProvider===provider;
