@@ -11786,6 +11786,14 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
     return checks, healthy
 
 
+def _deployment_health_identity() -> dict | None:
+    """Return bounded worker identity for blue/green deployment probes."""
+    release_id = os.environ.get("HERMES_WEBUI_RELEASE_ID", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", release_id):
+        return None
+    return {"release_id": release_id, "pid": os.getpid()}
+
+
 def _handle_health(handler, parsed):
     deep = parse_qs(parsed.query or "").get("deep", [""])[0].lower() in {"1", "true", "yes", "on"}
     stream_check = _streams_lock_health()
@@ -11801,6 +11809,9 @@ def _handle_health(handler, parsed):
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
         "accept_loop": _accept_loop_health(handler),
     }
+    deployment = _deployment_health_identity()
+    if deployment:
+        payload["deployment"] = deployment
     if "oldest_run_age_seconds" in run_check:
         payload["oldest_run_age_seconds"] = run_check["oldest_run_age_seconds"]
     if "idle_seconds_since_last_run" in run_check:
