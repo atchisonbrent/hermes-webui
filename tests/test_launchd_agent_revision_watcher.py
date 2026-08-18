@@ -4,12 +4,17 @@ from pathlib import Path
 START = Path(__file__).resolve().parents[1] / "start.sh"
 
 
-def test_launchd_webui_starts_quiet_agent_revision_watcher():
+def test_launchd_webui_does_not_own_its_revision_watcher():
+    """start.sh must serve WebUI, not supervise a process that can restart it."""
     script = START.read_text()
-    assert 'XPC_SERVICE_NAME:-' in script
-    assert 'com.parantoux.hermes-webui' in script
-    assert '.hermes/scripts/webui-agent-update-watch.py' in script
-    assert 'HERMES_WEBUI_AGENT_WATCH_INTERVAL:-60' in script
-    assert 'ps -o lstart=' in script
-    assert '_hermes_server_started' in script
-    assert '_hermes_current_started' in script
+
+    forbidden = (
+        "webui-agent-update-watch.py",
+        "launchctl",
+        "HERMES_WEBUI_AGENT_WATCH_INTERVAL",
+        "ps -o lstart=",
+        "_hermes_server_started",
+        "_hermes_current_started",
+    )
+    for token in forbidden:
+        assert token not in script

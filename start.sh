@@ -165,26 +165,4 @@ EOF
   exit 0
 fi
 
-# The external macOS WebUI is supervised by launchd, but `hermes update` does
-# not restart it. Under that exact LaunchAgent only, run the Git-owned revision
-# guard as a quiet child loop. The loop watches this shell's PID; `exec` below
-# preserves that PID for bootstrap.py, so the watcher exits with the server.
-# This belongs here rather than in Hermes cron: high-frequency cron completion
-# events are user-visible even when the watchdog has nothing to report.
-if [[ "${XPC_SERVICE_NAME:-}" == "com.parantoux.hermes-webui" ]]; then
-  _hermes_agent_watch="${HOME}/.hermes/scripts/webui-agent-update-watch.py"
-  if [[ -x "${_hermes_agent_watch}" ]]; then
-    _hermes_server_pid=$$
-    _hermes_server_started="$(ps -o lstart= -p "${_hermes_server_pid}" 2>/dev/null | xargs)"
-    _hermes_watch_interval="${HERMES_WEBUI_AGENT_WATCH_INTERVAL:-60}"
-    (
-      while sleep "${_hermes_watch_interval}"; do
-        _hermes_current_started="$(ps -o lstart= -p "${_hermes_server_pid}" 2>/dev/null | xargs)"
-        [[ -n "${_hermes_current_started}" && "${_hermes_current_started}" == "${_hermes_server_started}" ]] || exit 0
-        "${_hermes_agent_watch}"
-      done
-    ) &
-  fi
-fi
-
 exec "${PYTHON}" "${REPO_ROOT}/bootstrap.py" --no-browser "$@"
