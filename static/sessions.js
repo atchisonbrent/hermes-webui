@@ -2165,6 +2165,11 @@ async function loadSession(sid){
     S.activeStreamId=activeStreamId;
     const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
     const replayPersistedLiveToolCards=(opts)=>{
+      // A successful Anchor scene restore already painted the whole live turn.
+      // appendLiveToolCard redraws that entire scene when it owns the DOM, so
+      // replaying N saved tools here would rebuild all N rows N times. Keep
+      // per-tool replay only for legacy HTML restoration / scene fallback.
+      if(restoredAnchorScene) return;
       const liveToolCalls=Array.isArray(S.toolCalls)
         ? S.toolCalls
         : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
