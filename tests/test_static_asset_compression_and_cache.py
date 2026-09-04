@@ -19,6 +19,7 @@ re-introduce no-store or break the gzip/304 path.
 """
 
 import gzip
+import hashlib
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -122,7 +123,7 @@ def test_fingerprinted_url_gets_immutable_cache(isolated_static):
     from api import routes
     _make_static_file(isolated_static, "ui.js", b"x" * 2000)
 
-    h = _serve(routes, "/static/ui.js", query="v=abc1234")
+    h = _serve(routes, "/static/ui.js", query="v=sha256-" + hashlib.sha256(b"x" * 2000).hexdigest())
     assert h.header("Cache-Control") == "public, max-age=31536000, immutable"
 
 
@@ -147,11 +148,12 @@ def test_conditional_get_returns_304(isolated_static):
     from api import routes
     _make_static_file(isolated_static, "ui.js", b"hello world\n" * 100)
 
-    first = _serve(routes, "/static/ui.js", query="v=abc")
+    query = "v=sha256-" + hashlib.sha256(b"hello world\n" * 100).hexdigest()
+    first = _serve(routes, "/static/ui.js", query=query)
     etag = first.header("ETag")
     assert etag is not None
 
-    second = _serve(routes, "/static/ui.js", query="v=abc",
+    second = _serve(routes, "/static/ui.js", query=query,
                     request_headers={"If-None-Match": etag})
     assert second.status == 304
     assert second.header("ETag") == etag
