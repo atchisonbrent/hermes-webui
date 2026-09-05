@@ -136,12 +136,14 @@ HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
   python tests/browser_historical_transcript_hydration.py
 ```
 
-The dedicated `Conversation lifecycle (informational)` workflow runs the current
-proof rows (`normal`, `terminal-error`, `historical-transcript-hydration`, and the
-Chromium `reconnect-scene-redraw` matrix) and stays non-blocking while the public
-matrix expands to additional behavior rows. The maintainer's private QA harness
-remains broader; later public slices will add cancellation, compression, and
-recovery coverage.
+The dedicated `Conversation lifecycle (informational)` workflow keeps the existing
+proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`)
+non-blocking while the public matrix expands. The Chromium
+`reconnect-scene-redraw` row does **not** allow failures: it exercises the real
+`loadSession` reconnect path and fails the workflow on a regression. Required
+merge checks remain a maintainer-controlled repository setting.
+The maintainer's private QA harness remains broader; later public slices will
+add cancellation, compression, and recovery coverage.
 
 ### Active-session reconnect redraw gate
 

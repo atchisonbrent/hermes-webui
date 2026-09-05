@@ -34,7 +34,8 @@ jobs:
   live-to-final:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
+    # Keep existing proof rows informational; reconnect regressions fail CI.
+    continue-on-error: ${{ matrix.name != 'reconnect-scene-redraw' }}
     strategy:
       fail-fast: false
       matrix:
