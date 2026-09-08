@@ -630,6 +630,9 @@ function _resetMessageRenderWindow(sid){
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
 }
+function _restoreMessageRenderWindowAfterSettledRender(){
+  _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+}
 function _cancelMessageVirtualizedRender(){
   if(_messageVirtualScrollRaf){
     cancelAnimationFrame(_messageVirtualScrollRaf);
@@ -1646,6 +1649,14 @@ async function jumpToSessionStart(){
     // insertion is blocked by !S.busy, losing Activity until "done" fires.
     if(!(S.busy||S.activeStreamId)){
       renderMessages({ preserveScroll:true });
+    }else if(typeof _scheduleMessageVirtualizedRender==='function'){
+      // ...but on a virtualized transcript SOMETHING still has to mount the new
+      // render window. The scroll listener used to do it; it now correctly skips
+      // while a programmatic scroll is in flight (the idle re-render-loop fix),
+      // and this path deliberately does not call renderMessages() — so without an
+      // explicit schedule the jump lands on an all-spacer, zero-row transcript.
+      // Force the window update here, after invalidating _messageVirtualWindowKey.
+      _scheduleMessageVirtualizedRender(true);
     }
     requestAnimationFrame(()=>{
       container.scrollTop=0;
@@ -4605,10 +4616,16 @@ function renderModelDropdown(){
     else if(_prevHasSearch){ for(const k in _groupOpenState) delete _groupOpenState[k]; }
     _prevHasSearch=hasSearch;
     const found=new Set();
+    // Fold whitespace/hyphens/dots on both sides so "ox alpha", "ox-alpha" and
+    // "ox.alpha" all match the same model (OpenRouter display names use spaces,
+    // ids use slashes/hyphens) (#7228).
+    const _foldModelSearch=(s)=>String(s||'').toLowerCase().replace(/[\s._-]+/g,'');
+    const foldTerm=_foldModelSearch(term);
     for(const m of _modelData){
       const name=m.name.toLowerCase();
       const id=m.id.toLowerCase();
-      if(name.includes(term)||id.includes(term)){
+      if(name.includes(term)||id.includes(term)
+         ||(foldTerm&&(_foldModelSearch(name).includes(foldTerm)||_foldModelSearch(id).includes(foldTerm)))){
         found.add(m.value);
       }
     }
@@ -6378,12 +6395,12 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    _scheduleMessageVirtualizedRender();
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
     }
     if(_freshProgrammaticScrollActive()) return;
+    _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -7529,7 +7546,7 @@ function _stripXmlToolCallsDisplay(s){
   s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
   // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
   s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
-  return s.trim();
+  return s.replace(/^\s+/, '');
 }
 
 function _sanitizeThinkingDisplayText(text){
