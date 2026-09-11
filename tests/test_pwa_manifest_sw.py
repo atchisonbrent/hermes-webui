@@ -163,8 +163,8 @@ class TestPWARoutes:
         idx = src.find('"/sw.js"')
         assert idx != -1, "routes.py must handle /sw.js"
         block = src[idx:idx + 1000]
-        assert "__WEBUI_VERSION__" in block, (
-            "sw.js route must replace __WEBUI_VERSION__ with the current WEBUI_VERSION"
+        assert "render_service_worker(" in block, (
+            "sw.js route must render the content-addressed manifest and cache identity"
         )
         assert "WEBUI_VERSION" in block, (
             "sw.js route must import and use WEBUI_VERSION for cache busting"
@@ -212,7 +212,7 @@ class TestIndexHtmlIntegration:
 
     def test_index_uses_version_placeholders_for_static_assets(self):
         src = INDEX.read_text(encoding="utf-8")
-        assert "sw.js?v=__WEBUI_VERSION__" in src
+        assert "sw.js?v=__SERVICE_WORKER_VERSION__" in src
         assert "static/ui.js?v=__WEBUI_VERSION__" in src
 
     def test_index_versions_stylesheet(self):
@@ -255,6 +255,8 @@ class TestIndexHtmlIntegration:
             "ui.js",
             "messages.js",
             "sessions.js",
+            "extension_settings.js",
+            "outline.js",
             "panels.js",
             "commands.js",
             "icons.js",
@@ -306,7 +308,7 @@ class TestIndexHtmlIntegration:
 
     def test_sw_precaches_pwa_startup_helper(self):
         src = SW.read_text(encoding="utf-8")
-        assert "pwa-startup.js' + VQ" in src or 'pwa-startup.js" + VQ' in src, (
+        assert "pwa-startup.js?v=__WEBUI_VERSION__" in src, (
             "sw.js SHELL_ASSETS must pre-cache pwa-startup.js with the same "
             "version query used by index.html"
         )
