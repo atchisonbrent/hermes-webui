@@ -1690,11 +1690,12 @@ async function send(){
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
+  const priorToolCalls=S.toolCalls;
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
+    S.messages.push(userMsg);renderMessages({reuseSettledTurns:true,priorToolCalls});setBusy(true);
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else appendThinking('',{pending:true});
@@ -6326,14 +6327,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             ? _captureMessageScrollSnapshot()
             : null;
           if(typeof _armKeepSettledWorklogOpen==='function') _armKeepSettledWorklogOpen(_settledStreamId);
-          syncTopbar();renderMessages({preserveScroll:true});
+          syncTopbar();renderMessages({preserveScroll:true,reuseSettledTurns:true});
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
           const _collapsedInPlace=typeof _collapseJustSettledWorklogInPlace==='function'
             && _collapseJustSettledWorklogInPlace(_settledStreamId);
           if(!_collapsedInPlace&&typeof _renderMessagesWithScrollSnapshot==='function'){
-            _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
+            _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot,reuseSettledTurns:true});
           }else if(!_collapsedInPlace){
-            renderMessages({preserveScroll:true});
+            renderMessages({preserveScroll:true,reuseSettledTurns:true});
           }else if(_doneLiveScrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
             _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
           }

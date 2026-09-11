@@ -6751,7 +6751,22 @@ function _formatInServerTz(date, options) {
   const sign = m[1] === '+' ? 1 : -1;
   const offsetMin = sign * (parseInt(m[2]) * 60 + parseInt(m[3]));
   const adjusted = new Date(date.getTime() + offsetMin * 60 * 1000);
-  return adjusted.toLocaleString(undefined, { ...options, timeZone: 'UTC' });
+  const formatOptions={ ...options, timeZone: 'UTC' };
+  // toLocaleString reconstructs ICU formatting state for every historical
+  // timestamp. Reuse UTC formatters; only the Date changes with server offset.
+  // Keep native default/invalid-date semantics outside our concrete UI formats.
+  if(!Number.isFinite(adjusted.getTime()) || !Object.keys(formatOptions).some(k=>
+    ['weekday','year','month','day','hour','minute','second','dateStyle','timeStyle'].includes(k)
+  )) return adjusted.toLocaleString(undefined, formatOptions);
+  const cache=_formatInServerTz._formatters||(_formatInServerTz._formatters=new Map());
+  const key=JSON.stringify(formatOptions);
+  let formatter=cache.get(key);
+  if(!formatter){
+    formatter=new Intl.DateTimeFormat(undefined,formatOptions);
+    if(cache.size>=16) cache.clear();
+    cache.set(key,formatter);
+  }
+  return formatter.format(adjusted);
 }
 
 function _localDayOrdinal(timestampMs) {

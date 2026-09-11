@@ -903,11 +903,11 @@ def test_settled_legacy_activity_buckets_skip_anchor_owned_turns_before_renderin
     render = _function_body(_ui_js(), "renderMessages")
 
     tool_loop = render.index("for(const tc of (S.toolCalls||[])){")
-    tool_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;", tool_loop)
+    tool_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;", tool_loop)
     thinking_loop = render.index("for(const aIdx of assistantThinking.keys()){")
-    thinking_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;", thinking_loop)
+    thinking_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;", thinking_loop)
     worklog_loop = render.index("for(const [aIdx,seg] of assistantSegments){")
-    worklog_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;", worklog_loop)
+    worklog_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;", worklog_loop)
     anchor_render = render.index("_renderSettledAnchorSceneForMessage(msg, seg, rawIdx)")
 
     assert tool_loop < tool_skip < thinking_loop < thinking_skip < worklog_loop < worklog_skip

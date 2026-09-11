@@ -198,7 +198,7 @@ def test_stream_done_collapses_in_place_after_disarm_with_render_fallback():
         "the in-place collapse path must still restore the pre-captured live scroll "
         "snapshot so pinned and unpinned readers keep their viewport."
     )
-    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot})" in after, (
+    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot,reuseSettledTurns:true})" in after, (
         "if in-place collapse cannot prove it owns the exact settled Worklog, the "
         "STREAM_DONE handler must fall back to the old scroll-preserving render pass."
     )

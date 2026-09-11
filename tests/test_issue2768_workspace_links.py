@@ -52,7 +52,7 @@ def _render(markdown: str) -> str:
         '''
     )
     proc = subprocess.run(
-        ["node", "-e", js, markdown],
+        ["node", "-e", js, "--", markdown],
         cwd=REPO,
         text=True,
         capture_output=True,

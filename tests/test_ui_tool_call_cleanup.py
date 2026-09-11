@@ -858,7 +858,7 @@ class TestToolCardDesignTokens:
         assert ".tool-card-no-detail .tool-card-header{cursor:default;}" in CSS
         assert ".tool-card-no-detail .tool-card-header:hover{background:transparent;color:var(--muted);}" in CSS
 
-        build_start = UI_JS.index("function buildToolCard(tc){")
+        build_start = UI_JS.index("function buildToolCard(tc, options){")
         build_end = UI_JS.index("function _syncToolCallGroupSummary", build_start)
         build = UI_JS[build_start:build_end]
         assert "_toolActionLabelText(tc,{limit:112})" in build

@@ -59,7 +59,7 @@ def test_per_segment_tool_activity_does_not_include_run_metadata_rows():
 
 def test_tool_activity_uses_tool_cards_and_run_activity_owns_timer():
     assert "buildToolCard(tc)" in UI_JS
-    build_fn = UI_JS.split("function buildToolCard(tc)", 1)[1].split("function _syncToolCallGroupSummary", 1)[0]
+    build_fn = UI_JS.split("function buildToolCard(tc, options)", 1)[1].split("function _syncToolCallGroupSummary", 1)[0]
     assert "tool-card-duration" not in build_fn
     assert "tool-worklog-list" in UI_JS
     assert "tool-worklog-summary" in UI_JS
