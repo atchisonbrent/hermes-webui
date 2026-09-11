@@ -11,6 +11,7 @@ from api import models
 @pytest.fixture(autouse=True)
 def isolated_sidecars(monkeypatch, tmp_path):
     monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
 
 
 def test_recovery_ignores_stale_cached_count_after_sidecar_replacement(monkeypatch):

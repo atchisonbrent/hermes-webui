@@ -1,6 +1,10 @@
 """A hot asset edit must escape an immutable CDN entry without a restart."""
 import hashlib
+from pathlib import Path
 import re
+import sys
+
+import pytest
 from urllib.parse import urlparse
 
 import api.config as config
@@ -69,6 +73,7 @@ def test_worker_namespace_follows_asset_and_worker_edits(tmp_path):
     assert first == render_service_worker(template, tmp_path, 'fixed')
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='Windows ctime is creation time; use changed mtime or atomic replacement')
 def test_preserved_mtime_and_same_size_cannot_hide_hot_edit(tmp_path, monkeypatch):
     import os
     from api.asset_versions import render_asset_urls
@@ -165,3 +170,69 @@ def test_outside_root_asset_is_never_read_or_fingerprinted(tmp_path):
     (root / 'linked.js').symlink_to(outside)
     assert render_asset_urls('static/../outside.js?v=__WEBUI_VERSION__', root) == 'static/../outside.js'
     assert render_asset_urls('static/linked.js?v=__WEBUI_VERSION__', root) == 'static/linked.js'
+
+
+def test_directory_asset_does_not_prevent_shell_render(tmp_path):
+    from api.asset_versions import render_asset_urls
+    (tmp_path / 'directory').mkdir()
+    assert render_asset_urls('static/directory?v=__WEBUI_VERSION__', tmp_path) == 'static/directory'
+
+
+def test_unchanged_worker_template_is_read_once(tmp_path, monkeypatch):
+    from api.asset_versions import service_worker_version
+    worker = tmp_path / 'sw.js'
+    worker.write_text("const C='__ASSET_VERSION__'; const A=['./static/a.js?v=__WEBUI_VERSION__'];")
+    (tmp_path / 'a.js').write_text('old')
+    reads = []
+    original = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == worker:
+            reads.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read)
+    first = service_worker_version(tmp_path, 'fixed')
+    assert first == service_worker_version(tmp_path, 'fixed')
+    assert len(reads) == 1
+    (tmp_path / 'a.js').write_text('new')
+    assert first != service_worker_version(tmp_path, 'fixed')
+    assert len(reads) == 1
+    worker.write_text(worker.read_text() + '// changed worker')
+    assert first != service_worker_version(tmp_path, 'fixed')
+    assert len(reads) == 3  # explicit edit read plus cache-invalidating read
+
+
+def test_unchanged_template_urls_are_parsed_once(tmp_path, monkeypatch):
+    from api import asset_versions as assets
+    (tmp_path / 'a.js').write_text('old')
+    template = f'<!-- {tmp_path.name} --> static/a.js?v=__WEBUI_VERSION__'
+    original = assets._ASSET_URL
+    scans = []
+
+    class CountingPattern:
+        def finditer(self, text):
+            scans.append(text)
+            return original.finditer(text)
+
+    monkeypatch.setattr(assets, '_ASSET_URL', CountingPattern())
+    first = assets.asset_replacements(template, tmp_path)
+    assert first == assets.asset_replacements(template, tmp_path)
+    (tmp_path / 'a.js').write_text('new')
+    assert first != assets.asset_replacements(template, tmp_path)
+    assert len(scans) == 1
+
+
+def test_atomic_replacement_with_preserved_mtime_changes_identity(tmp_path):
+    import os
+    from api.asset_versions import render_asset_urls
+    asset = tmp_path / 'a.js'
+    asset.write_bytes(b'old')
+    stamp = asset.stat()
+    template = 'static/a.js?v=__WEBUI_VERSION__'
+    first = render_asset_urls(template, tmp_path)
+    replacement = tmp_path / 'replacement'
+    replacement.write_bytes(b'new')
+    os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    replacement.replace(asset)
+    assert first != render_asset_urls(template, tmp_path)

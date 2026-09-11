@@ -390,8 +390,9 @@ def persisted_message_count_for_session(session_id: str) -> Optional[int]:
     written by ``Session.save`` as ``meta['message_count'] = len(messages)`` —
     the SAME basis the frontend's ``S.session.message_count`` is built from —
     so the comparison is apples-to-apples. Legacy sidecars may require a full
-    read on the first lookup; the metadata loader caches those recovered facts
-    by file signature. Returns None when no count can be recovered, which the
+    read on a facts-cache miss and an index lookup on each call; the metadata
+    loader caches recovered sidecar facts by file signature. Returns None when
+    no count can be recovered, which the
     caller treats as "cannot tell, do nothing", never as a trigger.
     """
     try:

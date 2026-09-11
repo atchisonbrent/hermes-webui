@@ -1,6 +1,10 @@
 """Settled root-relative artifact links must remain links after Markdown rendering."""
+import shutil
+
 import pytest
 from tests.test_issue2768_workspace_links import _render
+
+pytestmark = pytest.mark.skipif(shutil.which('node') is None, reason='Node.js required for renderer tests')
 
 
 @pytest.mark.parametrize('wrapper', ['{}', '## {}', '- {}', '> {}', '| File |\n| --- |\n| {} |'])
@@ -22,3 +26,23 @@ def test_root_relative_link_inside_fenced_code_remains_literal():
     html = _render('```markdown\n[download](/api/file/raw?path=book.epub)\n```')
     assert '<a href=' not in html
     assert '[download](/api/file/raw?path=book.epub)' in html
+
+
+def test_root_relative_session_link_uses_existing_navigation():
+    html = _render('[session](/session/fixture)')
+    assert 'class="session-link"' in html
+    assert 'href="/session/fixture"' in html
+    ordinary = _render('[report](/session-report)')
+    assert 'session-link' not in ordinary
+    assert 'href="/session-report"' in ordinary
+
+
+def test_deep_backslash_destination_is_not_actionable():
+    assert '<a href=' not in _render('[download](/a\\b)')
+
+
+@pytest.mark.parametrize('wrapper', ['{}', '- {}'])
+def test_root_relative_image_is_not_reinterpreted_as_link(wrapper):
+    html = _render(wrapper.format('![cover](/cover.png)'))
+    assert '<a href=' not in html
+    assert '![cover](/cover.png)' in html

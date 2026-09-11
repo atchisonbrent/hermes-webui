@@ -7,7 +7,51 @@ import time
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 from browser_conversation_lifecycle import _start_webui_server, _terminate_process
-from browser_reconnect_scene_redraw import INIT, session_route, fixture
+from urllib.parse import parse_qs, urlsplit
+
+def fixture(count):
+    tools = [dict(name='terminal', tid=f'tool-{i}', args={'command': f'printf result-{i}'},
+                  preview=f'result-{i}', snippet=f'result-{i}', done=True) for i in range(count)]
+    rows = [dict(row_id=f'tool:{t["tid"]}', local_id=t['tid'], role='tool', kind='tool_call',
+                 source_event_type='tool_complete', status='completed', order_index=i,
+                 tool=t, payload=t) for i, t in enumerate(tools)]
+    return dict(stream_id='run-fixture', last_seq=1000, last_event_id='run-fixture:1000',
+                messages=[], tool_calls=tools, last_assistant_text='', last_reasoning_text='',
+                anchor_activity_scene=dict(version='activity_scene_v1',
+                                           identity=dict(session_id='fixture', stream_id='run-fixture', run_id='run-fixture'),
+                                           activity_rows=rows))
+
+
+INIT = """
+// A controlling service worker bypasses Playwright's page route fixtures in
+// WebKit. This test targets reconnect rendering, not PWA cache behavior.
+if(window===window.top && 'serviceWorker' in navigator){
+  navigator.serviceWorker.register=()=>Promise.reject(new Error('Disabled in reconnect harness'));
+}
+window.fixtureSources=[];
+class FixtureEventSource {
+  static OPEN=1; static CONNECTING=0; static CLOSED=2;
+  constructor(url){this.url=String(url);this.readyState=1;this.listeners={};window.fixtureSources.push(this);}
+  addEventListener(name,fn){(this.listeners[name]||=[]).push(fn);}
+  removeEventListener(){}
+  close(){this.readyState=2;}
+  emit(name,data,id){for(const fn of this.listeners[name]||[])fn({data:JSON.stringify(data),lastEventId:id||''});}
+}
+window.EventSource=FixtureEventSource;
+"""
+
+
+def session_route(session, sid, workspace):
+    def handle(route):
+        query = parse_qs(urlsplit(route.request.url).query)
+        requested = query.get('session_id', [''])[0]
+        data = session if requested == sid else dict(
+            session_id='idle-fixture', messages=[], message_count=0,
+            tool_calls=[], workspace=workspace)
+        route.fulfill(json={'session': data})
+    return handle
+
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -110,9 +154,13 @@ def main():
                                 await send();
                                 const source=fixtureSources.findLast(s=>s.url.includes('api/chat/stream?')&&s.readyState===1);
                                 if(!source)throw new Error('missing stream');
-                                const answer='## Download\n\n[**EPUB**](/api/file/raw?path=book.epub)';
+                                const answer='## Download\n\n[**EPUB**](https://example.com/book.epub)';
                                 source.emit('token',{text:answer},'run-fixture:1');
-                                await new Promise(r=>setTimeout(r,100));
+                                const liveDeadline=performance.now()+5000;
+                                while(!document.querySelector('#liveAssistantTurn')?.textContent.includes('Download')){
+                                    if(performance.now()>=liveDeadline)throw new Error('live token did not render');
+                                    await new Promise(r=>requestAnimationFrame(r));
+                                }
                                 const historical=document.querySelector('#msgInner .assistant-turn');
                                 const messages=S.messages.filter(m=>!m._live).map(m=>{const copy={...m};if(copy._pending)delete copy._pending;return copy;});
                                 messages.push({role:'assistant',content:answer});
@@ -121,12 +169,16 @@ def main():
                                 try{
                                     source.emit('done',{session:{...metadata,messages,message_count:messages.length}},'run-fixture:2');
                                     source.emit('stream_end',{},'run-fixture:3');
+                                    // Terminal finalization may wait for pending live prose.
+                                    const deadline=performance.now()+5000;
+                                    while((S.busy||renders===0)&&performance.now()<deadline) await new Promise(r=>setTimeout(r,20));
+                                    if(S.busy)throw new Error('completion did not settle');
                                 }finally{renderMessages=originalRender;}
                                 if(renders!==1)throw new Error('prose-only done rebuilt transcript '+renders+' times');
                                 if(!historical.isConnected)throw new Error('done rebuilt unchanged historical activity');
                                 if(S.busy||S.messages.length!==before+2)throw new Error('completion state mismatch');
                                 const links=Array.from(document.querySelectorAll('#msgInner a')).filter(a=>a.textContent==='EPUB');
-                                if(links.length!==1||links[0].getAttribute('href')!=='/api/file/raw?path=book.epub')throw new Error('EPUB link not rendered');
+                                if(links.length!==1||links[0].getAttribute('href')!=='https://example.com/book.epub')throw new Error('EPUB link not rendered');
                                 const roles=Array.from(document.querySelector('#msgInner').children).map(n=>n.dataset.role).filter(Boolean);
                                 if(roles.join(',')!=='user,assistant,user,assistant,user,assistant,user,user,assistant')throw new Error('turn order changed: '+roles);
                                 return {renders,link:true};

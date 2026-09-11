@@ -651,6 +651,7 @@ def pytest_collection_modifyitems(config, items):
         'test_delivery_options_structure',
         'test_delivery_options_includes_common_platforms',
         'test_delivery_options_local_label',
+        'test_delivery_options_survives_the_authority_module_move',
         # Skills endpoints (need tools.skills_tool module)
         'test_skills_list',
         'test_skills_list_has_required_fields',
@@ -1191,6 +1192,24 @@ _REAL_HERMES_STATE = sys.modules.get("hermes_state")
 _AGENT_PATH_ENV_KEYS = ("HERMES_WEBUI_AGENT_DIR", "PYTHONPATH", "HERMES_WEBUI_PYTHON")
 _REAL_AGENT_ENV = {k: os.environ.get(k) for k in _AGENT_PATH_ENV_KEYS}
 _REAL_SYS_PATH = list(sys.path)
+
+# Keep the Windows restart seams inert after the suite isolation snapshots.
+from api import updates as _updates
+
+_real_windows_restart_spawn = _updates._windows_restart_spawn
+_real_windows_restart_exit = _updates._windows_restart_exit
+
+
+def _pytest_session_safe_windows_restart_spawn(_args, **_kwargs):  # pragma: no cover
+    return None
+
+
+def _pytest_session_safe_windows_restart_exit(_code):  # pragma: no cover
+    return None
+
+
+_updates._windows_restart_spawn = _pytest_session_safe_windows_restart_spawn
+_updates._windows_restart_exit = _pytest_session_safe_windows_restart_exit
 
 
 def _hermes_cli_is_healthy() -> bool:

@@ -37,10 +37,13 @@ class _FakeHandler:
 
 
 class _BrokenIndexPath:
+    read_called = False
+
     def stat(self):
-        return SimpleNamespace(st_size=1, st_mtime_ns=1)
+        return SimpleNamespace(st_dev=1, st_ino=1, st_size=1, st_mtime_ns=1, st_ctime_ns=1)
 
     def read_text(self, *args, **kwargs):
+        self.read_called = True
         raise RuntimeError("simulated index.html read failure")
 
 
@@ -48,12 +51,14 @@ def test_home_route_internal_error_returns_html_503_not_json(monkeypatch):
     from api import config as api_config
     from api import routes
 
-    monkeypatch.setattr(api_config, "get_index_html_path", lambda: _BrokenIndexPath())
+    broken_index = _BrokenIndexPath()
+    monkeypatch.setattr(api_config, "get_index_html_path", lambda: broken_index)
     monkeypatch.setattr(routes, "_INDEX_SHELL_CACHE", {})
 
     handler = _FakeHandler()
     assert routes.handle_get(handler, urlparse("http://example.com/")) is True
 
+    assert broken_index.read_called
     assert handler.status == 503
     assert (handler.header("Content-Type") or "").startswith("text/html; charset=utf-8")
     assert handler.header("Cache-Control") == "no-store"

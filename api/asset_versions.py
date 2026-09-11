@@ -33,23 +33,28 @@ def _file_version(path: Path, signature: tuple) -> str:
     return content_version(path.read_bytes())
 
 
+@lru_cache(maxsize=32)
+def _template_asset_urls(template: str) -> tuple:
+    return tuple(dict.fromkeys(
+        (match.group(0), match['url'], match['name'])
+        for match in _ASSET_URL.finditer(template)
+    ))
+
+
 def asset_replacements(template: str, static_root: Path) -> tuple:
     """Resolve each distinct template URL once. Never fingerprint missing files."""
     root = static_root.resolve()
     replacements = {}
-    for match in _ASSET_URL.finditer(template):
-        original = match.group(0)
-        if original in replacements:
-            continue
-        path = (root / match['name']).resolve()
+    for original, url, name in _template_asset_urls(template):
+        path = (root / name).resolve()
         try:
             path.relative_to(root)
             version = _file_version(path, file_signature(path))
-            replacement = match['url'] + '?v=' + version
-        except (FileNotFoundError, ValueError):
-            # Preserve the normal 404 for incomplete/custom static trees without
-            # reading escaped paths or promising immutable nonexistent bytes.
-            replacement = match['url']
+            replacement = url + '?v=' + version
+        except (OSError, ValueError):
+            # Leave unavailable/custom references to the normal static route,
+            # without reading escaped paths or promising immutable bytes.
+            replacement = url
         replacements[original] = replacement
     return tuple(replacements.items())
 
@@ -63,19 +68,34 @@ def render_asset_urls(template: str, static_root: Path) -> str:
     return apply_asset_replacements(template, asset_replacements(template, static_root))
 
 
-def render_service_worker(template: str, static_root: Path, version: str) -> str:
-    rendered = render_asset_urls(template, static_root).replace('__WEBUI_VERSION__', version)
-    # The namespace follows both worker logic and its exact asset manifest.
+@lru_cache(maxsize=32)
+def _worker_template(path: Path, signature: tuple) -> str:
+    return path.read_text(encoding='utf-8')
+
+
+@lru_cache(maxsize=32)
+def _worker_content(template: str, replacements: tuple, version: str) -> tuple:
+    # The shipped template consumes version placeholders as asset URLs. Keep
+    # standalone version tokens supported for custom worker templates as before.
+    rendered = apply_asset_replacements(template, replacements).replace('__WEBUI_VERSION__', version)
     # Hash with the cache-name placeholder intact to avoid a circular identity.
-    return rendered.replace('__ASSET_VERSION__', content_version(rendered.encode('utf-8')))
+    rendered = rendered.replace('__ASSET_VERSION__', content_version(rendered.encode('utf-8')))
+    return rendered, content_version(rendered.encode('utf-8'))
+
+
+def render_service_worker(template: str, static_root: Path, version: str) -> str:
+    replacements = asset_replacements(template, static_root)
+    return _worker_content(template, replacements, version)[0]
 
 
 def service_worker_version(static_root: Path, version: str) -> str:
     """A new registration URL requests an update even within browser throttles."""
     try:
-        template = (static_root / 'sw.js').read_text(encoding='utf-8')
+        path = static_root / 'sw.js'
+        template = _worker_template(path, file_signature(path))
     except FileNotFoundError:
         # PWA support is optional: retain the shell and let registration's 404
         # reach its existing catch handler, rather than returning a shell 503.
         return ''
-    return content_version(render_service_worker(template, static_root, version).encode('utf-8'))
+    replacements = asset_replacements(template, static_root)
+    return _worker_content(template, replacements, version)[1]

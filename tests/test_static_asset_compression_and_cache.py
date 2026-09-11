@@ -9,9 +9,10 @@ Pre-fix shape:
 
 Fix: _serve_static now negotiates gzip when the client opts in, emits
 weak ETags for conditional GETs, and sends `max-age=31536000, immutable`
-when the request URL carries a `?v=…` fingerprint (`max-age=300`
-otherwise). Bytes + headers are cached in-process and invalidated on
-(size, mtime) change so a redeploy is picked up without a restart.
+when the request URL's fingerprint matches the returned bytes. Obsolete
+versions use no-store; unversioned requests retain max-age=300. Bytes and
+headers are cached by file identity, size, mtime and ctime so detected edits
+are picked up without a restart. ETags identify content, not stat values.
 
 These tests pin both halves — header policy AND the cache-invalidation
 contract — so future refactors of _serve_static cannot silently
@@ -163,7 +164,7 @@ def test_conditional_get_returns_304(isolated_static):
 
 
 def test_etag_changes_when_file_changes(isolated_static):
-    """Cache must invalidate when (size, mtime) changes — guards redeploy correctness."""
+    """Changed file signatures must reload bytes and produce a new content ETag."""
     import time
     from api import routes
 
@@ -171,7 +172,7 @@ def test_etag_changes_when_file_changes(isolated_static):
     first = _serve(routes, "/static/ui.js")
     etag_v1 = first.header("ETag")
 
-    # Touch with a later mtime (1 s granularity matches the ETag formula).
+    # Give the edit a distinct timestamp, including on coarse filesystems.
     time.sleep(1.1)
     f.write_bytes(b"v2-different-content" * 50)
 
