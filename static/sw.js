@@ -6,13 +6,13 @@
  */
 
 // Cache version is injected by the server at request time (routes.py /sw.js handler).
-// Bumps automatically whenever the git commit changes — no manual edits needed.
-const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
+// Follows worker bytes and asset content, including hot edits without a restart.
+const CACHE_NAME = 'hermes-shell-__ASSET_VERSION__';
 
 // Static assets that form the app shell.
 //
-// Versioned assets (CSS + JS) include `?v=__WEBUI_VERSION__` to match the
-// query string the page sends — see index.html. Without the version query
+// Versioned assets (CSS + JS) receive per-file content hashes matching the
+// query strings the page sends — see index.html. Without the version query
 // here, every cache lookup against `?v=...` URLs would miss and fall through
 // to network, defeating the pre-cache.
 //
@@ -20,25 +20,27 @@ const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 // either the authenticated app shell or login code, and stale cached responses
 // can make valid password submits fail until the user clears browser cache.
 // Navigations populate './' only after a successful non-redirect network load.
-const VQ = '?v=__WEBUI_VERSION__';
+
 const SHELL_ASSETS = [
-  './static/style.css' + VQ,
-  './static/pwa-startup.js' + VQ,
-  './static/boot.js' + VQ,
-  './static/assistant_turn_anchors.js' + VQ,
-  './static/ui.js' + VQ,
-  './static/messages.js' + VQ,
-  './static/sessions.js' + VQ,
-  './static/panels.js' + VQ,
-  './static/commands.js' + VQ,
-  './static/icons.js' + VQ,
-  './static/i18n.js' + VQ,
-  './static/workspace.js' + VQ,
-  './static/terminal.js' + VQ,
-  './static/onboarding.js' + VQ,
-  './static/vendor/smd.min.js' + VQ,
-  './static/vendor/katex/0.16.22/katex.min.css' + VQ,
-  './static/vendor/katex/0.16.22/katex.min.js' + VQ,
+  './static/style.css?v=__WEBUI_VERSION__',
+  './static/pwa-startup.js?v=__WEBUI_VERSION__',
+  './static/boot.js?v=__WEBUI_VERSION__',
+  './static/assistant_turn_anchors.js?v=__WEBUI_VERSION__',
+  './static/ui.js?v=__WEBUI_VERSION__',
+  './static/messages.js?v=__WEBUI_VERSION__',
+  './static/sessions.js?v=__WEBUI_VERSION__',
+  './static/extension_settings.js?v=__WEBUI_VERSION__',
+  './static/outline.js?v=__WEBUI_VERSION__',
+  './static/panels.js?v=__WEBUI_VERSION__',
+  './static/commands.js?v=__WEBUI_VERSION__',
+  './static/icons.js?v=__WEBUI_VERSION__',
+  './static/i18n.js?v=__WEBUI_VERSION__',
+  './static/workspace.js?v=__WEBUI_VERSION__',
+  './static/terminal.js?v=__WEBUI_VERSION__',
+  './static/onboarding.js?v=__WEBUI_VERSION__',
+  './static/vendor/smd.min.js?v=__WEBUI_VERSION__',
+  './static/vendor/katex/0.16.22/katex.min.css?v=__WEBUI_VERSION__',
+  './static/vendor/katex/0.16.22/katex.min.js?v=__WEBUI_VERSION__',
   './static/favicon.svg',
   './static/favicon-32.png',
   './manifest.json',
@@ -153,9 +155,8 @@ self.addEventListener('fetch', (event) => {
   const shellPath = './' + relPath.replace(/^\/+/, '') + url.search;
   if (!SHELL_ASSETS.includes(shellPath)) return;
 
-  // Shell assets: network-first with cache fallback. This keeps offline support
-  // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION
-  // has not changed yet (e.g. before a guarded restart updates the ?v token).
+  // Shell assets: network-first with cache fallback. Content identities escape
+  // stale upstream caches; network-first alone cannot invalidate a CDN entry.
   event.respondWith(
     fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
       if (

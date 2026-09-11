@@ -12797,41 +12797,44 @@ def _save_saved_prompts(prompts: list) -> None:
     p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# In-process cache for the app-shell template. The `/`, `/index.html`, and
-# `/session/<id>` routes are the hottest navigations and each re-read the
-# ~190 KB static/index.html from disk and re-ran the two process-constant
-# substitutions (__WEBUI_VERSION__, __MAX_UPLOAD_BYTES__) on every request.
-# Those values are fixed for the process lifetime, so we cache the partially
-# rendered template here, keyed by (size, nanosecond mtime) exactly like
-# _STATIC_CACHE so a redeploy is picked up without a restart. The two values
-# that genuinely vary per request — the per-session CSRF token and the runtime
-# extension tags (inject_extension_tags) — are still applied on each request
-# against the cached base, so caching changes no observable output.
+# Cache the shell source and its rendered base separately. Asset bytes may
+# change while index.html and the process's Git version remain unchanged.
+# CSRF tokens and extension tags remain per-request, outside this shared cache.
 _INDEX_SHELL_CACHE: dict = {}
 _INDEX_SHELL_CACHE_LOCK = threading.Lock()
 
 
 def _render_index_shell_base() -> str:
-    """Return static/index.html with the process-constant tokens substituted.
-
-    Cached and invalidated on (size, mtime_ns) change. The CSRF token and
-    extension-tag injection are intentionally NOT applied here — they vary per
-    request and are applied by the caller against this base string.
-    """
+    """Return the shell with current asset identities, but no session data."""
+    from api.asset_versions import (
+        asset_replacements, apply_asset_replacements, file_signature, service_worker_version,
+    )
     from api.updates import WEBUI_VERSION
+    from urllib.parse import quote
+
+    version_token = quote(WEBUI_VERSION, safe="")
 
     index_path = api_config.get_index_html_path()
-    st = index_path.stat()
-    sig = (index_path, st.st_size, st.st_mtime_ns)
+    source_sig = (index_path, file_signature(index_path))
+    with _INDEX_SHELL_CACHE_LOCK:
+        source = _INDEX_SHELL_CACHE.get("source")
+    if not source or source[0] != source_sig:
+        source = (source_sig, index_path.read_text(encoding="utf-8"))
+        with _INDEX_SHELL_CACHE_LOCK:
+            _INDEX_SHELL_CACHE["source"] = source
+    replacements = asset_replacements(source[1], api_config.get_static_root())
+    worker_version = (
+        service_worker_version(api_config.get_static_root(), version_token)
+        if '__SERVICE_WORKER_VERSION__' in source[1] else ''
+    )
+    sig = (source_sig, replacements, worker_version, WEBUI_VERSION, MAX_UPLOAD_BYTES)
     with _INDEX_SHELL_CACHE_LOCK:
         cached = _INDEX_SHELL_CACHE.get("base")
         if cached and cached[0] == sig:
             return cached[1]
-    from urllib.parse import quote
-
-    version_token = quote(WEBUI_VERSION, safe="")
     base = (
-        index_path.read_text(encoding="utf-8")
+        apply_asset_replacements(source[1], replacements)
+        .replace("__SERVICE_WORKER_VERSION__", worker_version)
         .replace("__WEBUI_VERSION__", version_token)
         .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
     )
@@ -13493,6 +13496,7 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/login":
+        from api.asset_versions import render_asset_urls
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
         _lang = _settings.get("language", "en")
@@ -13503,7 +13507,7 @@ def handle_get(handler, parsed) -> bool:
         from api.updates import WEBUI_VERSION
         version_token = quote(WEBUI_VERSION, safe="")
         _page = (
-            _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
+            render_asset_urls(_LOGIN_PAGE_HTML, api_config.get_static_root()).replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
             .replace("{{WEBUI_VERSION}}", version_token)
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
@@ -13638,13 +13642,13 @@ def handle_get(handler, parsed) -> bool:
         static_root = api_config.get_static_root()
         sw_path = (static_root / "sw.js").resolve()
         if sw_path.exists():
-            # Inject the current git-derived version as the cache name so the
-            # service worker cache busts automatically on every new deploy.
+            # Fingerprint the manifest and worker bytes, not startup Git state.
+            from api.asset_versions import render_service_worker
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
             version_token = quote(WEBUI_VERSION, safe="")
-            text = sw_path.read_text(encoding="utf-8").replace(
-                "__WEBUI_VERSION__", version_token
+            text = render_service_worker(
+                sw_path.read_text(encoding="utf-8"), static_root, version_token
             )
             data = text.encode("utf-8")
             handler.send_response(200)
@@ -17722,7 +17726,7 @@ _COMPRESSIBLE_MIME = {
 }
 
 # In-process cache for raw bytes, compressed bytes, and ETag. The cache is keyed
-# by absolute path and invalidated on (size, high-precision mtime) change, so a
+# by absolute path and invalidated on file identity/size/mtime/ctime change, so a
 # redeploy is picked up without a process restart. Missing/random paths never
 # enter the cache; memory cost is bounded by the static/ tree's served files.
 _STATIC_CACHE: dict = {}
@@ -17730,6 +17734,7 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 
 def _serve_static(handler, parsed):
+    from api.asset_versions import content_version, file_signature
     static_root = api_config.get_static_root().resolve()
     # Strip the leading '/static/' prefix, then resolve and sandbox
     rel = parsed.path[len("/static/") :]
@@ -17745,33 +17750,32 @@ def _serve_static(handler, parsed):
     ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
 
     # Look up or populate the per-file cache (raw, optional gzip, ETag).
-    # Keyed by absolute path; invalidated by (size, nanosecond mtime).
-    st = static_file.stat()
-    sig = (st.st_size, st.st_mtime_ns)
+    # Keyed by absolute path; invalidated by the full file signature.
+    sig = file_signature(static_file)
     cache_key = str(static_file)
-    raw = gz = etag = None
+    raw = gz = etag = fingerprint = None
     with _STATIC_CACHE_LOCK:
         cached = _STATIC_CACHE.get(cache_key)
         if cached and cached[0] == sig:
-            _, raw, gz, etag = cached
+            _, raw, gz, etag, fingerprint = cached
     if raw is None:
         raw = static_file.read_bytes()
-        # Weak ETag: equality semantics, derived from filesystem identity.
-        etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
+        # Identity describes the bytes actually served (including across races).
+        fingerprint = content_version(raw)
+        etag = f'W/"{fingerprint}"'
         gz = (gzip.compress(raw, compresslevel=6)
               if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
               else None)
         with _STATIC_CACHE_LOCK:
-            _STATIC_CACHE[cache_key] = (sig, raw, gz, etag)
+            _STATIC_CACHE[cache_key] = (sig, raw, gz, etag, fingerprint)
 
-    # The page template substitutes __WEBUI_VERSION__ at request time (see the
-    # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
-    # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
-    # is safe to cache aggressively: any redeploy changes the URL.
+    # Only an exact content identity earns immutable caching. Old Git-versioned
+    # clients still receive usable bytes, but cannot freeze them for another year.
     version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
-    has_fingerprint = bool(version_values[0])
+    has_fingerprint = version_values == [fingerprint]
     cache_control = (
         "public, max-age=31536000, immutable" if has_fingerprint
+        else "no-store" if any(version_values)
         else "public, max-age=300"
     )
 

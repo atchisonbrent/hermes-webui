@@ -9,9 +9,10 @@ Pre-fix shape:
 
 Fix: _serve_static now negotiates gzip when the client opts in, emits
 weak ETags for conditional GETs, and sends `max-age=31536000, immutable`
-when the request URL carries a `?v=…` fingerprint (`max-age=300`
-otherwise). Bytes + headers are cached in-process and invalidated on
-(size, mtime) change so a redeploy is picked up without a restart.
+when the request URL's fingerprint matches the returned bytes. Obsolete
+versions use no-store; unversioned requests retain max-age=300. Bytes and
+headers are cached by file identity, size, mtime and ctime so detected edits
+are picked up without a restart. ETags identify content, not stat values.
 
 These tests pin both halves — header policy AND the cache-invalidation
 contract — so future refactors of _serve_static cannot silently
@@ -19,6 +20,7 @@ re-introduce no-store or break the gzip/304 path.
 """
 
 import gzip
+import hashlib
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -122,7 +124,7 @@ def test_fingerprinted_url_gets_immutable_cache(isolated_static):
     from api import routes
     _make_static_file(isolated_static, "ui.js", b"x" * 2000)
 
-    h = _serve(routes, "/static/ui.js", query="v=abc1234")
+    h = _serve(routes, "/static/ui.js", query="v=sha256-" + hashlib.sha256(b"x" * 2000).hexdigest())
     assert h.header("Cache-Control") == "public, max-age=31536000, immutable"
 
 
@@ -147,11 +149,12 @@ def test_conditional_get_returns_304(isolated_static):
     from api import routes
     _make_static_file(isolated_static, "ui.js", b"hello world\n" * 100)
 
-    first = _serve(routes, "/static/ui.js", query="v=abc")
+    query = "v=sha256-" + hashlib.sha256(b"hello world\n" * 100).hexdigest()
+    first = _serve(routes, "/static/ui.js", query=query)
     etag = first.header("ETag")
     assert etag is not None
 
-    second = _serve(routes, "/static/ui.js", query="v=abc",
+    second = _serve(routes, "/static/ui.js", query=query,
                     request_headers={"If-None-Match": etag})
     assert second.status == 304
     assert second.header("ETag") == etag
@@ -161,7 +164,7 @@ def test_conditional_get_returns_304(isolated_static):
 
 
 def test_etag_changes_when_file_changes(isolated_static):
-    """Cache must invalidate when (size, mtime) changes — guards redeploy correctness."""
+    """Changed file signatures must reload bytes and produce a new content ETag."""
     import time
     from api import routes
 
@@ -169,7 +172,7 @@ def test_etag_changes_when_file_changes(isolated_static):
     first = _serve(routes, "/static/ui.js")
     etag_v1 = first.header("ETag")
 
-    # Touch with a later mtime (1 s granularity matches the ETag formula).
+    # Give the edit a distinct timestamp, including on coarse filesystems.
     time.sleep(1.1)
     f.write_bytes(b"v2-different-content" * 50)
 

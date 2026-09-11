@@ -73,11 +73,11 @@ def test_test_notification_without_sid_still_targets_current_page_for_reuse():
 
 
 def test_service_worker_update_delivery_keeps_versioned_no_store_route():
-    assert "const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';" in SW_SRC
+    assert "const CACHE_NAME = 'hermes-shell-__ASSET_VERSION__';" in SW_SRC
     assert "self.skipWaiting();" in SW_SRC
     assert "self.clients.claim();" in SW_SRC
 
     route_idx = ROUTES_SRC.index('"/sw.js"')
     route_block = ROUTES_SRC[route_idx : route_idx + 1200]
-    assert 'replace(\n                "__WEBUI_VERSION__", version_token\n            )' in route_block
+    assert 'text = render_service_worker(' in route_block
     assert 'handler.send_header("Cache-Control", "no-store")' in route_block
