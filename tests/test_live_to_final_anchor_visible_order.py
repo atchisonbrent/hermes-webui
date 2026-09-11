@@ -437,7 +437,7 @@ def test_live_processed_anchor_renders_before_first_activity_row():
 def test_live_processed_anchor_starts_before_chat_start_returns_stream_id():
     send = _function_body(MESSAGES_JS, "send")
 
-    optimistic_idx = send.index("S.messages.push(userMsg);renderMessages();setBusy(true);")
+    optimistic_idx = send.index("S.messages.push(userMsg);renderMessages({reuseSettledTurns:true,priorToolCalls});setBusy(true);")
     started_idx = send.index("if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;", optimistic_idx)
     ensure_idx = send.index("if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();", optimistic_idx)
     fallback_idx = send.index("else appendThinking('',{pending:true});", ensure_idx)
@@ -1144,7 +1144,7 @@ def test_anchor_owned_settled_turn_skips_legacy_worklog_rebuild():
     assert "const anchorOwnedAssistantRawIdxs=new Set();" in render
     assert "msg._anchor_activity_scene" in render
     assert "anchorOwnedAssistantRawIdxs.add(idx)" in render
-    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;" in render
+    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;" in render
     assert "if(anchorOwnedAssistantRawIdxs.has(rawIdx)) return;" in render
     assert "S.messages.indexOf(m)" not in render
     assert "S.messages.some((m,rawIdx)=>" in render
@@ -1173,10 +1173,10 @@ def test_transparent_stream_renders_persisted_anchor_scene_after_reload():
     assert "_syncTransparentEventControls(turn)" in transparent
     # tool + thinking rows are rendered as transparent event rows
     assert "_decorateTransparentEventRow(_thinkingActivityNode" in row
-    assert "_decorateTransparentEventRow(buildToolCard(toolCall)" in row
+    assert "_decorateTransparentEventRow(buildToolCard(toolCall,{deferDetail:settled})" in row
     assert "_transparentToolStatus(toolCall,settled)" in row
     assert 'data-anchor-settled-scene-row' in row
-    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;" in render
+    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;" in render
 
 
 def test_live_anchor_scene_snapshot_renders_transparent_rows_before_compact_gate():
@@ -1762,7 +1762,7 @@ def test_done_follow_scroll_uses_pre_settle_follow_state():
     done = _event_listener_body(MESSAGES_JS, "done")
 
     capture_idx = done.index("const shouldFollowOnDone=")
-    render_idx = done.index("syncTopbar();renderMessages({preserveScroll:true});")
+    render_idx = done.index("syncTopbar();renderMessages({preserveScroll:true,reuseSettledTurns:true});")
     follow_idx = done.index("if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();")
     assert capture_idx < render_idx < follow_idx
     after_render = done[render_idx:follow_idx]

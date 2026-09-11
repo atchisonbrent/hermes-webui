@@ -364,7 +364,7 @@ console.log(JSON.stringify({
 
 def test_tool_rows_do_not_carry_message_measurement_hook():
     js = UI_JS_PATH.read_text(encoding="utf-8")
-    build_start = js.index("function buildToolCard(tc){")
+    build_start = js.index("function buildToolCard(tc, options){")
     build_end = js.index("function _colorDiffLines", build_start)
     build_body = js[build_start:build_end]
 

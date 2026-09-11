@@ -13299,7 +13299,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     });
   }else if(row.role==='tool'){
     const toolCall=_anchorSceneToolCallFromRow(row,{settled});
-    node=_decorateTransparentEventRow(buildToolCard(toolCall),{
+    node=_decorateTransparentEventRow(buildToolCard(toolCall,{deferDetail:settled}),{
       type:'tool',
       name:toolCall&&toolCall.name,
       status:_transparentToolStatus(toolCall,settled),
@@ -14446,7 +14446,18 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const group=Array.from(inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]'))
     .filter(candidate=>candidate.getAttribute('data-anchor-stream-id')===String(streamId))
     .pop();
-  if(!group) return false;
+  if(!group){
+    // Prose-only answers never acquired temporary expanded activity. There is
+    // nothing to collapse: do not redraw the entire transcript to prove that.
+    // A matching transparent scene still needs the ordinary unarmed pass to
+    // restore its row cap, so retain that fallback whenever activity exists.
+    return !(S.messages||[]).some(message=>{
+      const scene=message&&message._anchor_activity_scene;
+      if(!scene) return false;
+      const owner=String(message._anchor_stream_id||scene.stream_id||(scene.identity&&scene.identity.stream_id)||'');
+      return owner===String(streamId)&&_anchorSceneSceneHasWorklogWorthyRows(scene);
+    });
+  }
   const ownerTurn=typeof group.closest==='function'?group.closest('.assistant-turn'):null;
   const ownerHasVisibleSegment=_assistantTurnHasVisibleRenderedSegment(ownerTurn);
   if(ownerHasVisibleSegment===null) return false;
@@ -16737,6 +16748,71 @@ function _processWakeupCardHtml(info, rawText, extras){
   return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
 }
 
+// Only complete, unchanged historical turns are reusable. The live/latest
+// turn and mixed compression/handoff UI remain on the ordinary renderer path.
+function _settledTurnMemoInput(start, visible, toolCalls){
+  if(S.messages[start]&&S.messages[start]._source==='process_wakeup') return null;
+  const boundary=visible.find(entry=>entry.rawIdx>start&&(entry.m.role!=='assistant'||entry.m._source==='process_wakeup'));
+  if(!boundary) return null;
+  // Reasoning echo comparison spans adjacent assistant messages even across
+  // wakeup rows. Keep both neighboring DOM turns on the full-render path.
+  const previous=visible.findLast(entry=>entry.rawIdx<start);
+  if(boundary.m._source==='process_wakeup'||previous?.m._source==='process_wakeup') return null;
+  const end=boundary.rawIdx;
+  const messages=S.messages.slice(start,end);
+  if(messages.some(m=>m&&(m._live||m._pending||m._partial||m._liveSegmentSeq!==undefined||m._activityBurstId!==undefined))) return null;
+  const days=new Set(messages.filter(m=>m&&m.role==='assistant'&&(m._ts||m.timestamp))
+    .map(m=>new Date((m._ts||m.timestamp)*1000).toDateString()));
+  if(days.size>1) return null;
+  const session=S.session||{};
+  const toolIds=new Set();
+  let unkeyedTool=false;
+  for(const message of messages){
+    const calls=[...(message.tool_calls||[]),...(message._partial_tool_calls||[]),
+      ...(Array.isArray(message.content)?message.content.filter(part=>part&&part.type==='tool_use'):[])];
+    for(const call of calls){
+      const id=call&&(call.tid||call.id||call.tool_call_id||call.tool_use_id||call.call_id);
+      if(id) toolIds.add(id); else unkeyedTool=true;
+    }
+  }
+  // Unkeyed legacy tools use a transcript-wide name/order fallback. Keep that
+  // ambiguous path on the ordinary renderer instead of guessing its inputs.
+  if(unkeyedTool) return null;
+  const linkedResults=toolIds.size?S.messages.filter(message=>message&&(
+    (message.role==='tool'&&toolIds.has(message.tool_call_id||message.tool_use_id))||
+    (Array.isArray(message.content)&&message.content.some(part=>part&&part.type==='tool_result'&&toolIds.has(part.tool_use_id)))
+  )):[];
+  const presentation=[new Date().toDateString(),session.session_id,session.model,session.model_provider,session.profile,
+    session.workspace,typeof _oldestIdx==='undefined'?0:_oldestIdx,
+    typeof _serverTz==='undefined'?'':_serverTz,
+    chatActivityMode(),window._showThinking,window._simplifiedToolCalling,window._showTokenUsage,
+    window._worklogDetailsExpandedByDefault,window._transparentEventTimestamps,
+    typeof assistantDisplayName==='function'?assistantDisplayName():'',
+    typeof isTpsDisplayEnabled==='function'&&isTpsDisplayEnabled()];
+  const relevant=calls=>(Array.isArray(calls)?calls:[]).filter(tc=>{
+    const rawIdx=tc&&tc.assistant_msg_idx;
+    const idx=Number(rawIdx);
+    const id=tc&&(tc.tid||tc.id||tc.tool_call_id||tc.call_id);
+    return toolIds.has(id)||rawIdx==null||rawIdx===''||!Number.isInteger(idx)||idx<0||(idx>=start&&idx<end);
+  });
+  // Settlement temporarily moves the same metadata into a different array.
+  // Compare the source the legacy renderer actually consumes, not both storage
+  // locations: moving unchanged data must not invalidate historical turns.
+  const effectiveTools=Array.isArray(S._settledLiveToolMetadata)
+    ? S._settledLiveToolMetadata : (toolCalls||S.toolCalls);
+  if(toolIds.size&&Array.isArray(effectiveTools)&&effectiveTools.length){
+    const metadataIds=new Set(effectiveTools.map(call=>call&&(call.tid||call.id||call.tool_call_id||call.call_id)));
+    if(Array.from(toolIds).some(id=>!metadataIds.has(id))) return null;
+  }
+  const turnTools=relevant(effectiveTools);
+  const persistedTools=relevant(session.tool_calls);
+  // Segment/burst routing can override assistant_msg_idx. Those legacy routes
+  // stay on the full renderer until their complete ownership can be proven.
+  if([...turnTools,...persistedTools].some(call=>call&&(call.activitySegmentSeq||call.activityBurstId))) return null;
+  try{return {start,end,signature:JSON.stringify([presentation,messages,linkedResults,
+    turnTools,persistedTools])};}catch(_){return null;}
+}
+
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
@@ -16875,6 +16951,21 @@ function renderMessages(options){
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
   const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
+  const reusableTurns=new Map();
+  const reusedAssistantIdxs=new Set();
+  const reusedTurns=new Set();
+  const canMemoizeTurns=!S.busy&&!INFLIGHT[sid]&&!virtualWindow.virtualized&&!hasTransientTranscriptUi
+    &&typeof _settledTurnMemoInput==='function';
+  if(canMemoizeTurns&&options&&options.reuseSettledTurns){
+    for(const turn of Array.from(inner.children)){
+      const memo=turn._settledTurnMemo;
+      if(!memo||turn.dataset.sessionId!==sid) continue;
+      const current=_settledTurnMemoInput(memo.start,renderVisWithIdx,options.priorToolCalls);
+      if(current&&current.end===memo.end&&current.signature===memo.signature){
+        reusableTurns.set(memo.start,{turn,memo:current});
+      }
+    }
+  }
   _recycleStash.clear();
   if(_msgNodeRecycleEnabled){
     for(const child of Array.from(inner.children)){
@@ -16917,7 +17008,24 @@ function renderMessages(options){
   // the live reply stops following / appears to jump backward.
   _programmaticScroll=true;
   _programmaticScrollSetAt=performance.now();
-  inner.innerHTML='';
+  const retainedTurns=new Set(Array.from(reusableTurns.values(),entry=>entry.turn));
+  if(retainedTurns.size){
+    for(const child of Array.from(inner.childNodes)){
+      if(!retainedTurns.has(child)) child.remove();
+    }
+  }else{
+    inner.innerHTML='';
+  }
+  let retainedCursor=inner.firstChild;
+  const appendRenderedNode=node=>{
+    if(node===retainedCursor){
+      retainedCursor=retainedCursor.nextSibling;
+    }else if(retainedCursor){
+      inner.insertBefore(node,retainedCursor);
+    }else{
+      inner.appendChild(node);
+    }
+  };
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
@@ -16955,7 +17063,7 @@ function renderMessages(options){
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   if(virtualWindow.virtualized&&virtualWindow.topPad>0){
-    inner.appendChild(_messageVirtualSpacer(virtualWindow.topPad,'before'));
+    appendRenderedNode(_messageVirtualSpacer(virtualWindow.topPad,'before'));
   }
   if(hasServerOlder){
     const indicator=document.createElement('button');
@@ -16965,7 +17073,7 @@ function renderMessages(options){
     indicator.textContent=serverOlderCount>0
       ? `Load earlier messages (${serverOlderCount} older)`
       : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
-    inner.appendChild(indicator);
+    appendRenderedNode(indicator);
     _wireMessageWindowLoadEarlierButton();
   }
   let lastUserRawIdx=-1;
@@ -17112,7 +17220,7 @@ function renderMessages(options){
       // turn before rendering the always-visible tail so assistant segments do
       // not merge across the spacer boundary.
       currentAssistantTurn=null;
-      inner.appendChild(_messageVirtualSpacer(virtualWindow.bottomPad,'after'));
+      appendRenderedNode(_messageVirtualSpacer(virtualWindow.bottomPad,'after'));
     }
     const {m,rawIdx}=renderVisWithIdx[vi];
     const _tsSep=m._ts||m.timestamp;
@@ -17123,9 +17231,27 @@ function renderMessages(options){
         const sep=document.createElement('div');
         sep.className='msg-date-sep';
         sep.textContent=_fmtDateSep(_d);
-        inner.appendChild(sep);
+        appendRenderedNode(sep);
       }
       _prevSepKey=_key;
+    }
+    if(reusedAssistantIdxs.has(rawIdx)) continue;
+    const reusable=m.role==='assistant'&&reusableTurns.get(rawIdx);
+    if(reusable){
+      currentAssistantTurn=reusable.turn;
+      reusedTurns.add(currentAssistantTurn);
+      appendRenderedNode(currentAssistantTurn);
+      for(const entry of renderVisWithIdx){
+        if(entry.rawIdx>=reusable.memo.start&&entry.rawIdx<reusable.memo.end&&entry.m.role==='assistant'){
+          reusedAssistantIdxs.add(entry.rawIdx);
+        }
+      }
+      for(const seg of currentAssistantTurn.querySelectorAll('.assistant-segment[data-msg-idx]')){
+        const idx=Number(seg.dataset.msgIdx);
+        if(!assistantSegments.has(idx)) assistantSegments.set(idx,seg);
+      }
+      _setLatestAssistantTurnLandmark(currentAssistantTurn,reusedAssistantIdxs.has(latestRenderedAssistantRawIdx));
+      continue;
     }
     let content=m.content||'';
     let thinkingText='';
@@ -17320,7 +17446,7 @@ function renderMessages(options){
         row._wakeupRenderedHtml=nextRowHtml;
         row.innerHTML=nextRowHtml;
       }
-      inner.appendChild(row);
+      appendRenderedNode(row);
       userRows.set(rawIdx, row);
       continue;
     }
@@ -17362,7 +17488,7 @@ function renderMessages(options){
       // typeof guard keeps renderMessages runnable in the node test harnesses that
       // extract it without this helper (they stub every collaborator by name).
       if(typeof _applyUserRowIntrinsicHeight==='function') _applyUserRowIntrinsicHeight(row, newRawText);
-      inner.appendChild(row);
+      appendRenderedNode(row);
       userRows.set(rawIdx, row);
       continue;
     }
@@ -17383,7 +17509,7 @@ function renderMessages(options){
       currentAssistantTurn.dataset.role='assistant';
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
       currentAssistantTurn.dataset.recycleKey=rawIdx;
-      inner.appendChild(currentAssistantTurn);
+      appendRenderedNode(currentAssistantTurn);
     }
     _setLatestAssistantTurnLandmark(currentAssistantTurn, !m._live&&rawIdx===latestRenderedAssistantRawIdx);
     const seg=document.createElement('div');
@@ -17795,7 +17921,9 @@ function renderMessages(options){
     // regression vs master; same content-loss-on-switch class as #3668). The
     // `:not([data-live-thinking="1"])` / live-card guards below keep the active
     // turn's own live nodes from being double-built.
-    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]):not([data-event-type="tool"]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]):not([data-event-type="tool"]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>{
+      if(!reusedTurns.has(el.closest('.assistant-turn'))) el.remove();
+    });
     const byActivity = new Map();
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const _assistantAnchorForActivity=(aIdx,segmentSeq,burstId)=>{
@@ -17853,7 +17981,7 @@ function renderMessages(options){
       const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
       if(tid&&transparentOrderedToolIds.has(tid)) continue;
       const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
-      if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
+      if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const segmentSeq=normalizeToken(tc.activitySegmentSeq);
       const burstId=normalizeToken(tc.activityBurstId);
@@ -17864,7 +17992,7 @@ function renderMessages(options){
       entry.includeAnchorReason=true;
     }
     for(const aIdx of assistantThinking.keys()){
-      if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
+      if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const seg=assistantSegments.get(aIdx);
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
@@ -17874,7 +18002,7 @@ function renderMessages(options){
       if(entry.thinkingIdx===null) entry.thinkingIdx=aIdx;
     }
     for(const [aIdx,seg] of assistantSegments){
-      if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
+      if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;
       if(!seg||!seg.classList||!seg.classList.contains('assistant-segment-worklog-source')) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       if(!_worklogReasonHtmlFromAnchor(seg)) continue;
@@ -18020,6 +18148,7 @@ function renderMessages(options){
     }
   }
   for(const [rawIdx,seg] of assistantSegments){
+    if(reusedAssistantIdxs.has(rawIdx)) continue;
     const msg=S.messages[rawIdx];
     if(msg&&msg._anchor_activity_scene){
       _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
@@ -18043,6 +18172,7 @@ function renderMessages(options){
   {
     const renderedAssistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     for(const mi of renderedAssistantIdxs){
+      if(reusedAssistantIdxs.has(mi)) continue;
       const msg=S.messages[mi]||{};
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
@@ -18363,6 +18493,17 @@ function renderMessages(options){
   }
   // Apply persisted playback speed after media nodes are rendered.
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
+  if(canMemoizeTurns){
+    for(const turn of Array.from(inner.children)){
+      if(!turn.classList.contains('assistant-turn')||turn.id==='liveAssistantTurn'||reusedTurns.has(turn)) continue;
+      if(turn.querySelector('.compression-turn,.handoff-turn,[data-live-assistant="1"]')){
+        delete turn._settledTurnMemo;
+        continue;
+      }
+      const first=turn.querySelector('.assistant-segment[data-msg-idx]');
+      turn._settledTurnMemo=first?_settledTurnMemoInput(Number(first.dataset.msgIdx),renderVisWithIdx):null;
+    }
+  }
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   // Skip caching while the just-settled keep-open token is armed: that render
@@ -18909,7 +19050,8 @@ function _toolDetailLeadText(kind, tc){
   if(!target) return '';
   return target;
 }
-function buildToolCard(tc){
+function buildToolCard(tc, options){
+  const deferDetail=!!(options&&options.deferDetail);
   const row=document.createElement('div');
   row.className='tool-card-row';
   if(!row.dataset) row.dataset={};
@@ -18951,10 +19093,10 @@ function buildToolCard(tc){
   const argPreview=_formatToolArgPreview(tc&&tc.args);
   if(toolKind==='shell'||previewText===argPreview||previewText==='Completed'||previewText==='Running'||previewText==='Failed') previewText='';
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
-  const detailLeadText=hasDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
+  const detailLeadText=hasDetail&&!deferDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
   const detailLeadLabel=typeof _toolDetailLeadLabel==='function'?_toolDetailLeadLabel(toolKind):(toolKind==='shell'?'Shell':'Input');
   const detailLead=detailLeadText?`<div class="tool-card-detail-lead"><div class="tool-card-detail-lead-label">${esc(detailLeadLabel)}</div><pre>${esc(detailLeadText)}</pre></div>`:'';
-  const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
+  const argsEntries=!deferDetail&&tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
   const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
   row.innerHTML=`
     <div class="${cardClass}">
@@ -18965,7 +19107,7 @@ function buildToolCard(tc){
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
-      ${hasDetail?`<div class="tool-card-detail">
+      ${hasDetail&&!deferDetail?`<div class="tool-card-detail">
         ${detailLead}
         ${visibleArgs.length?`<div class="tool-card-args">${
           visibleArgs.map(([k,v])=>{
