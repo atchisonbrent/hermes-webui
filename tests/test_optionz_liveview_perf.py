@@ -615,36 +615,35 @@ def test_persisted_message_count_uses_metadata_only(monkeypatch):
     sid = "sess-persisted-count"
 
     # Normal: metadata stub carries _metadata_message_count.
-    monkeypatch.setattr(models, "get_session", lambda _sid, metadata_only=False: _make_meta_session(_sid, 7), raising=True)
+    monkeypatch.setattr(models.Session, "load_metadata_only", lambda _sid: _make_meta_session(_sid, 7), raising=True)
     assert bp.persisted_message_count_for_session(sid) == 7
 
     # Unknown count (legacy sidecar, no persisted count, empty messages) → None
     # so the caller treats it as "cannot tell", never a spurious trigger.
-    monkeypatch.setattr(models, "get_session", lambda _sid, metadata_only=False: _make_meta_session(_sid, None), raising=True)
+    monkeypatch.setattr(models.Session, "load_metadata_only", lambda _sid: _make_meta_session(_sid, None), raising=True)
     assert bp.persisted_message_count_for_session(sid) is None
 
     # Lookup failure (e.g. corrupt sidecar) is swallowed → None, never raises.
-    def _boom(_sid, metadata_only=False):
+    def _boom(_sid):
         raise RuntimeError("decode error")
-    monkeypatch.setattr(models, "get_session", _boom, raising=True)
+    monkeypatch.setattr(models.Session, "load_metadata_only", _boom, raising=True)
     assert bp.persisted_message_count_for_session(sid) is None
 
 
 def test_persisted_message_count_requests_metadata_only(monkeypatch):
-    """Guard the perf contract: the lookup MUST pass metadata_only=True so it
-    never parses a 400KB+ transcript on every per-session SSE (re)connect."""
+    """Guard the perf contract: recovery uses the cheap persisted metadata reader."""
     from api import background_process as bp
     import api.models as models
 
     seen = {}
 
-    def _spy(_sid, metadata_only=False):
-        seen["metadata_only"] = metadata_only
+    def _spy(_sid):
+        seen["sid"] = _sid
         return _make_meta_session(_sid, 3)
 
-    monkeypatch.setattr(models, "get_session", _spy, raising=True)
+    monkeypatch.setattr(models.Session, "load_metadata_only", _spy, raising=True)
     assert bp.persisted_message_count_for_session("sess-spy") == 3
-    assert seen.get("metadata_only") is True
+    assert seen.get("sid") == "sess-spy"
 
 
 def test_session_sse_handler_wires_finished_during_gap_self_heal():
