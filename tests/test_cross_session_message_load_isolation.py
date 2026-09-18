@@ -87,7 +87,9 @@ def _extract_function(source: str, name: str) -> str:
     raise AssertionError(f"Could not extract function {name}")
 
 
-LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession")
+LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession") + "\n" + _extract_function(
+    (REPO / "static" / "ui.js").read_text(encoding="utf-8"), "_adoptUserInputReceipts"
+)
 ENSURE_MESSAGES_LOADED_SRC = "\n".join(_extract_function(SESSIONS_SRC, name) for name in ("_loadedMessageBoundarySignature", "_preserveLoadedMessageWindow", "_restoreActiveTurnWindowBoundary", "_ensureMessagesLoaded"))
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
