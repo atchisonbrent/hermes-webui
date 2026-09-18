@@ -13588,6 +13588,14 @@ def _handle_session_get(handler, parsed) -> bool:
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+        if load_messages:
+            from .turn_journal import read_user_inputs
+            try:
+                raw["_user_inputs"] = read_user_inputs(sid)
+            except (ValueError, OSError):
+                raw["_user_inputs"] = []
+                raw["_user_inputs_unavailable"] = True
+                logger.warning("User input receipts unavailable for session load", exc_info=True)
         if load_messages and raw.get("active_stream_id") in active_stream_ids:
             raw["_active_turn_boundary"] = _active_turn_display_boundary(s, _all_msgs)
         _t4 = _time.monotonic()
@@ -26999,6 +27007,11 @@ def _handle_clarify_respond(handler, body):
     if not response:
         return bad(handler, "response is required")
     clarify_id = body.get("clarify_id", "")
+    try:
+        owner_stream_id = getattr(get_session(sid, metadata_only=True), "active_stream_id", None)
+    except Exception:
+        # Display ownership must never prevent accepting a pending answer.
+        owner_stream_id = None
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
@@ -27018,7 +27031,18 @@ def _handle_clarify_respond(handler, body):
             "stale": True,
         }, status=409)
 
-    return j(handler, {"ok": True, "response": response})
+    receipt = None
+    try:
+        from .turn_journal import record_user_input
+        saved_receipt = record_user_input(
+            sid, "clarify", response, stream_id=owner_stream_id,
+        )
+        receipt = redact_session_data({'_user_inputs': [saved_receipt]})['_user_inputs'][0]
+    except Exception:
+        # Already accepted: report a display failure, never invite resubmission.
+        logger.warning("Accepted clarification display receipt could not be saved", exc_info=True)
+    return j(handler, {"ok": True, "response": _redact_text(response), "user_input": receipt,
+                       "display_recorded": receipt is not None})
 
 
 class _ManualCompressionMemoryHandler:

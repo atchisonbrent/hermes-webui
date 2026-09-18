@@ -13408,8 +13408,23 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
 
-    return j(handler, {"accepted": accepted, "fallback": None,
-                       "stream_id": active_stream_id})
+    receipt = None
+    if accepted:
+        try:
+            from .turn_journal import record_user_input
+            display_text = (body or {}).get("display_text")
+            if not isinstance(display_text, str) or not display_text.strip():
+                display_text = text
+            saved_receipt = record_user_input(sid, "steer", display_text, stream_id=active_stream_id)
+            from .helpers import redact_session_data
+            receipt = redact_session_data({'_user_inputs': [saved_receipt]})['_user_inputs'][0]
+        except Exception:
+            # Guidance has already been accepted. A display failure is not a retry.
+            logger.warning("Accepted steer display receipt could not be saved", exc_info=True)
+    result = {"accepted": accepted, "fallback": None, "stream_id": active_stream_id}
+    if accepted:
+        result.update(user_input=receipt, display_recorded=receipt is not None)
+    return j(handler, result)
 
 
 def cancel_stream(stream_id: str) -> bool:

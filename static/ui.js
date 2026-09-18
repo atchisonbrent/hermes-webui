@@ -16945,6 +16945,74 @@ function _settledTurnMemoInput(start, visible, toolCalls){
     turnTools,persistedTools])};}catch(_){return null;}
 }
 
+function _adoptUserInputReceipts(session){
+  if(!S.session||session?.session_id!==S.session.session_id) return;
+  if(Array.isArray(session._user_inputs)) S.session._user_inputs=session._user_inputs;
+  S.session._user_inputs_unavailable=!!session._user_inputs_unavailable;
+}
+
+function _rememberUserInputReceipt(sid,receipt){
+  if(!S.session||S.session.session_id!==sid||!receipt?.input_id) return;
+  if(S._userInputsSessionId!==sid){S._userInputsSessionId=sid;S._userInputs=new Map();}
+  S._userInputs.set(receipt.input_id,receipt);
+  _renderUserInputReceipts();
+}
+
+function _renderUserInputReceipts(){
+  const inner=$('msgInner');
+  const sid=S.session?.session_id;
+  if(!inner||!sid) return;
+  if(S.session._user_inputs_unavailable&&S._userInputsWarningSessionId!==sid){
+    S._userInputsWarningSessionId=sid;
+    showToast(t('user_input_load_failed'),5000);
+  }
+  if(S._userInputsSessionId!==sid){S._userInputsSessionId=sid;S._userInputs=new Map();}
+  for(const receipt of S.session._user_inputs||[]){
+    if(receipt?.input_id) S._userInputs.set(receipt.input_id,receipt);
+  }
+  const existing=new Map(Array.from(inner.querySelectorAll('.user-input-receipt')).map(n=>[n.dataset.userInputId,n]));
+  const lastByTarget=new Map();
+  const inputs=Array.from(S._userInputs.values()).sort((a,b)=>a.timestamp-b.timestamp);
+  for(const receipt of inputs){
+    if(!['steer','clarify'].includes(receipt.kind)||typeof receipt.content!=='string') continue;
+    // Prefer an exact run owner. Timestamp fallback covers older/hidden scenes;
+    // inputs outside the loaded history stay out until their owning turn loads.
+    let target=Array.from(inner.querySelectorAll('[data-anchor-stream-id]')).find(n=>n.getAttribute('data-anchor-stream-id')===receipt.stream_id)?.closest('.assistant-turn');
+    if(!target&&receipt.stream_id&&(S.activeStreamId||S.session.active_stream_id)===receipt.stream_id) target=$('liveAssistantTurn');
+    if(!target){
+      let start=-1,end=S.messages.length;
+      for(let i=0;i<S.messages.length;i++){
+        const m=S.messages[i];
+        if(m.role!=='user') continue;
+        const ts=Number(m._ts||m.timestamp);
+        if(ts>0&&ts<=receipt.timestamp) start=i;
+        else if(start>=0){end=i;break;}
+      }
+      if(start>=0){
+        const candidates=Array.from(inner.querySelectorAll('[data-msg-idx]')).filter(n=>Number(n.dataset.msgIdx)>=start&&Number(n.dataset.msgIdx)<end);
+        const last=candidates[candidates.length-1];
+        target=last?.closest('.assistant-turn')||last?.closest('.msg-row');
+      }
+    }
+    if(!target) continue;
+    let row=existing.get(receipt.input_id);
+    if(!row){row=document.createElement('div');row.className='msg-row user-input-receipt';row.dataset.role='user';row.dataset.userInputId=receipt.input_id;}
+    const label=t(receipt.kind==='steer'?'user_input_steer':'user_input_answer');
+    const html=`<div class="msg-body" style="white-space:pre-wrap">${esc(receipt.content)}</div><div class="msg-foot"><span class="msg-time">${esc(label)} · ${esc(_formatMessageFooterTimestamp(receipt.timestamp))}</span></div>`;
+    if(row.innerHTML!==html) row.innerHTML=html;
+    const previous=lastByTarget.get(target);
+    const finalSegment=target.id!=='liveAssistantTurn'
+      ? Array.from(target.querySelectorAll('.assistant-segment')).filter(n=>!n.classList.contains('assistant-segment-worklog-source')&&n.style.display!=='none').pop()
+      : null;
+    if(previous) previous.after(row);
+    else if(finalSegment) finalSegment.before(row);
+    else target.after(row);
+    lastByTarget.set(target,row);
+    existing.delete(receipt.input_id);
+  }
+  for(const row of existing.values()) row.remove();
+}
+
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
@@ -17010,6 +17078,7 @@ function renderMessages(options){
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
       _rehydrateDeferredWorklogsFromCache(inner);
+      _renderUserInputReceipts();
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
@@ -18618,6 +18687,7 @@ function renderMessages(options){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId,S.session.session_id);
     _restoreWorklogDetailDisclosureState(inner,worklogDetailDisclosureState);
   }
+  _renderUserInputReceipts();
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.

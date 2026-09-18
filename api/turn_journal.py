@@ -153,6 +153,39 @@ def read_turn_journal(session_id: str, *, session_dir: Path | None = None) -> di
     return {"session_id": str(session_id), "events": events, "malformed": malformed}
 
 
+def record_user_input(
+    session_id: str, kind: str, content: str, *, stream_id: str | None = None,
+    session_dir: Path | None = None,
+) -> dict:
+    """Append a display receipt without creating/updating a recoverable turn."""
+    if kind not in {"steer", "clarify"} or not isinstance(content, str) or not content.strip():
+        raise ValueError("Invalid user input receipt")
+    receipt = {
+        "input_id": uuid.uuid4().hex, "kind": kind, "content": content,
+        "stream_id": str(stream_id or ""), "timestamp": time.time(),
+    }
+    append_turn_journal_event(
+        session_id, {"event": "user_input", "turn_id": "", **receipt},
+        session_dir=session_dir,
+    )
+    return receipt
+
+
+def read_user_inputs(
+    session_id: str, *, session_dir: Path | None = None,
+) -> list[dict]:
+    """Read only UI receipt fields; exclude lifecycle payloads and model input."""
+    fields = ("input_id", "kind", "content", "stream_id", "timestamp")
+    events = read_turn_journal(session_id, session_dir=session_dir)["events"]
+    return [
+        {key: event.get(key) for key in fields}
+        for event in events
+        if event.get("event") == "user_input" and event.get("input_id")
+        and event.get("kind") in {"steer", "clarify"}
+        and isinstance(event.get("content"), str)
+    ]
+
+
 def derive_turn_journal_states(events: Iterable[dict]) -> tuple[dict[str, dict], list[dict]]:
     '''Return the latest event per ``turn_id`` and any terminal-collision entries.
 

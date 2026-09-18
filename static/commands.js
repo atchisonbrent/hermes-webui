@@ -1641,7 +1641,7 @@ async function _trySteer(msg, explicitSteer){
   try{
     result=await api('/api/chat/steer',{
       method:'POST',
-      body:JSON.stringify({session_id:ownerSid,text:steerText}),
+      body:JSON.stringify({session_id:ownerSid,text:steerText,display_text:_steerIndicatorText(originalMsg,pendingFilesSnapshot)}),
     });
   }catch(e){
     // Network or server error — keep the active stream running and restore the draft.
@@ -1653,11 +1653,9 @@ async function _trySteer(msg, explicitSteer){
     // the upload/API await, which is fine: we're clearing the OWNER's draft).
     _steerUploadCache=null; // delivered — invalidate the retry cache
     if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
-    // Show a transient steer indicator in the chat (NOT in S.messages — it must
-    // survive the done event's S.messages=d.session.messages replacement).
-    // The indicator self-removes when the turn completes (done/cancel/error
-    // all call renderMessages which rebuilds msgInner). Only mutate the visible
-    // tray/DOM if the user is still looking at the owning session.
+    // Receipt rows stay separate from model messages. Only update the visible
+    // tray/DOM if this is still the owner session; legacy servers use the
+    // transient indicator until their receipt support is available.
     if(_steerOwnerIsCurrent(ownerSid)){
       // Remove ONLY the files we captured+delivered, by object identity, so any
       // files staged during the upload/API await are preserved (#5459 gate).
@@ -1666,9 +1664,13 @@ async function _trySteer(msg, explicitSteer){
         const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
-      _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      if(result.user_input&&typeof _rememberUserInputReceipt==='function'){
+        _rememberUserInputReceipt(ownerSid,result.user_input);
+      }else{
+        _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      }
     }
-    showToast(t('cmd_steer_delivered'),2500);
+    showToast(result.display_recorded===false?t('user_input_save_failed'):t('cmd_steer_delivered'),result.display_recorded===false?5000:2500);
     return true;
   }
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){

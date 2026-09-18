@@ -1229,6 +1229,11 @@ def redact_session_data(session_dict: dict) -> dict:
             result[key] = _redact_text(value, _enabled=_enabled)
         elif key in {'messages', 'context_messages'}:
             result[key] = _redact_messages(value, _enabled=_enabled, _active_turn_token=_active_turn_token)
+        elif key == '_user_inputs' and isinstance(value, list):
+            result[key] = [
+                {**_copy_json_value(entry), 'content': _redact_text(entry.get('content', ''), _enabled=_enabled)}
+                for entry in value if isinstance(entry, dict)
+            ]
         elif key == 'tool_calls' and isinstance(value, list):
             result[key] = _redact_tool_calls(value, _enabled=_enabled)
         elif key in {'todo_state', 'runtime_journal_snapshot'}:
