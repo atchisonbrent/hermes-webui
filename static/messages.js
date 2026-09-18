@@ -8864,6 +8864,12 @@ async function respondClarify(response) {
       body: JSON.stringify({ session_id: sid, response: value, clarify_id: clarifyId || "" })
     });
     if (result && result.ok) {
+      // Acceptance belongs to the submitted prompt, even if the next prompt
+      // arrived while the request was in flight. Do not create a model turn.
+      if(result.user_input&&typeof _rememberUserInputReceipt==='function'){
+        _rememberUserInputReceipt(sid,result.user_input);
+      }
+      if(result.display_recorded===false) showToast(t('user_input_save_failed'),5000);
       // Only clear/hide if the visible prompt still matches what was just
       // submitted.  If a parallel SSE event already loaded the next queued
       // prompt, erasing the session cache would leave the agent waiting
@@ -8873,8 +8879,8 @@ async function respondClarify(response) {
         _clarifyId = null;
         _clearClarifyPendingForSession(sid);
         hideClarifyCard(true, 'sent');
-        // Echo the user's clarify choice as a visible message in the conversation
-        if (S.session && S.session.session_id === sid) {
+        // Legacy servers lack receipts; retain their existing local echo.
+        if (!result.user_input && S.session && S.session.session_id === sid) {
           S.messages.push({
             role: 'user',
             content: value,

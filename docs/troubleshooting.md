@@ -118,6 +118,33 @@ the run is active. Recovery of persisted reasoning absent from both sources is
 not repaired here; durable rows remain available after settlement. Rounded
 pending timestamps without a matching checkpoint token use legacy recovery.
 
+## Steers and clarification answers in conversation history
+
+Accepted steers and clarification answers are saved as display receipts in the
+existing per-session turn journal. They have no turn ID, do not change model
+messages, and cannot cause turn recovery or replay the input. Session responses
+return them separately as `_user_inputs` when messages are requested, not on
+metadata-only polls. Receipt content uses the existing API credential redaction
+on both accepted responses and later loads. The browser shows escaped user rows
+beside the owning run, outside the compact worklog and before its final answer.
+Repeated rendering, including cached restores, dedupes by receipt ID rather than
+matching answer text. A journal read failure leaves the transcript available and
+shows a warning instead of silently implying there were no inputs.
+
+This starts with inputs accepted after backend activation; it does not invent
+historical entries from old tool output. Share/export projections do not include
+these display receipts. Older servers retain their existing
+local display behavior. If saving fails after acceptance, the UI reports that
+the input was accepted but its display entry could not be saved: **do not resend**.
+The browser keeps only the current session's receipt cache; other devices read
+the saved entries when loading or refreshing that conversation.
+
+Checks: `tests/test_user_input_receipts.py` exercises journal isolation, accepted
+and stale endpoint paths, save failure, and session readback.
+`tests/browser_user_input_receipts.py` exercises native submission handlers,
+reload, repeated rendering, HTML escaping, and session isolation with synthetic
+API/SSE fixtures in Chromium and WebKit at desktop/phone widths.
+
 ## Repeated SSE disconnects during a long run
 
 Each successful current-transport `open` starts a fresh reconnect budget. A prior

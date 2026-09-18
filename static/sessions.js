@@ -3292,6 +3292,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   if(S.session&&S.session.session_id===sid){
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+    _adoptUserInputReceipts(data.session);
     S.session.message_count=Number(data.session.message_count || msgs.length);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
@@ -3908,6 +3909,7 @@ async function _loadOlderMessages() {
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
       nextMessages = [...olderMsgs, ...S.messages];
     }
+    _adoptUserInputReceipts(responseSession);
     if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
     // Replace with the larger tail window and preserve scroll as if older
     // messages were prepended. When the suffix check fails, nextMessages
@@ -4043,6 +4045,7 @@ async function _ensureAllMessagesLoaded() {
     _oldestIdx = 0;
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
     if (S.session && S.session.session_id === sid) {
+      _adoptUserInputReceipts(data.session);
       S.session.message_count = Number(data.session.message_count || msgs.length);
       if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
         S.session.regeneration_revision = data.session.regeneration_revision;
