@@ -145,6 +145,21 @@ and stale endpoint paths, save failure, and session readback.
 reload, repeated rendering, HTML escaping, and session isolation with synthetic
 API/SSE fixtures in Chromium and WebKit at desktop/phone widths.
 
+## Internal reasoning-only recovery messages
+
+The exact built-in reasoning-only continuation nudge is filtered from transcript
+and live activity display, like other recovery controls. This is display-only:
+server-side history, user answers and reasoning are retained. Client display
+lists may omit the control row. Quoted text, workspace-wrapped text and messages
+with additional commentary remain visible. Legacy rows have no synthetic flag,
+so an otherwise identical user message or assistant echo is also classified as a
+recovery control. The literal comes from Hermes agent/conversation_loop.py
+`_CODEX_INCOMPLETE_NUDGE`; whitespace differences are normalized.
+
+`tests/test_issue4875_recovery_prompt_filter.py` covers exact-match boundaries;
+run `tests/browser_recovery_nudge_display.py` manually for the real rendered
+transcript in Chromium/WebKit at desktop and phone widths.
+
 ## Repeated SSE disconnects during a long run
 
 Each successful current-transport `open` starts a fresh reconnect budget. A prior
