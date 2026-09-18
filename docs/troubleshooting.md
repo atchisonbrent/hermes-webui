@@ -160,6 +160,24 @@ recovery control. The literal comes from Hermes agent/conversation_loop.py
 run `tests/browser_recovery_nudge_display.py` manually for the real rendered
 transcript in Chromium/WebKit at desktop and phone widths.
 
+## Resuming after mobile background suspension
+
+A connection error while hidden defers recovery until the page returns. The
+registry cleanup timer preserves that paused recovery owner, not just open
+transports. Errors delivered only after foreground return follow the same path.
+For a still-active run, recovery reuses the same-session snapshot loader and its
+journal cursor instead of painting every missed event. Connection drops with no
+pending suspension evidence retain the existing retry path. Snapshot recovery
+also falls back to that retry ladder after transient failures and honors available
+journal replay for stopped workers. Recovery validates and consumes
+the same fetched snapshot; if none is available, the incremental transport keeps
+its existing cursor rather than resetting replay to zero.
+
+`tests/browser_background_sse_resume.py` covers hidden error, elapsed cleanup,
+newer server snapshot, replay cursor, subsequent activity and teardown. Run with
+`ERROR_ON_RETURN=1` for delayed error delivery. These use deterministic visibility
+and timer seams in Chromium/WebKit, not a physical iOS suspension test.
+
 ## Repeated SSE disconnects during a long run
 
 Each successful current-transport `open` starts a fresh reconnect budget. A prior

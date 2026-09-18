@@ -1852,7 +1852,11 @@ async function loadSession(sid){
   // Guard against network/server failures to prevent a permanently stuck loading state.
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    // Background reconnect already fetched this exact session's snapshot.
+    // Consume it once so availability cannot change between validation and load.
+    data = sameSessionForceReload&&opts._resumeSnapshot?.session?.session_id===sid
+      ? opts._resumeSnapshot
+      : await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
