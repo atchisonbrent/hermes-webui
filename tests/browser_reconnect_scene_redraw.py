@@ -136,6 +136,56 @@ def main():
                                 assert measured['sources'], (result, errors)
                                 cursor=parse_qs(urlsplit(measured['sources'][-1]).query)
                                 assert cursor['after_seq']==[str(snapshot['last_seq'])], (result,errors)
+                                if not snapshot_path and mode=='compact_worklog':
+                                    # An interim update ends a prose burst, not the running
+                                    # turn. The Processed disclosure must retain its owner.
+                                    disclosure=page.evaluate("""()=>{
+                                      const group=document.querySelector('#liveAssistantTurn .tool-worklog-group');
+                                      const source=fixtureSources.findLast(s=>s.url.includes('api/chat/stream?')&&s.readyState===1);
+                                      if(!group.classList.contains('open')) group.querySelector('.tool-worklog-summary').click();
+                                      source.emit('interim_assistant',{text:'Still working on the fixture.'});
+                                      return {open:group.classList.contains('open'),
+                                        connected:group.isConnected,
+                                        live:group.getAttribute('data-live-tool-call-group')};
+                                    }""")
+                                    assert disclosure==dict(open=True,connected=True,live='1'),disclosure
+                                    page.evaluate("""async()=>{
+                                      const group=document.querySelector('#liveAssistantTurn .tool-worklog-group');
+                                      const source=fixtureSources.findLast(s=>s.url.includes('api/chat/stream?')&&s.readyState===1);
+                                      const check=expectedOpen=>{
+                                        if(!group.isConnected||group.classList.contains('open')!==expectedOpen||group.getAttribute('data-live-tool-call-group')!=='1')
+                                          throw new Error('interim update changed live disclosure ownership');
+                                        const scene=_projectLiveAnchorActivitySceneForStream(S.activeStreamId,chatActivityMode());
+                                        const expected=_anchorSceneRowsForRendering(scene,{settled:false}).filter(r=>r.role!=='thinking'||window._showThinking!==false).map(r=>r.row_id);
+                                        const actual=Array.from(group.querySelectorAll('[data-anchor-scene-row]')).map(n=>n.getAttribute('data-anchor-row-id'));
+                                        if(JSON.stringify(actual)!==JSON.stringify(expected))throw new Error('scene rows lost, duplicated or reordered');
+                                      };
+                                      // Both interim branches, with repeated reasoning/prose boundaries.
+                                      // Nested disclosures stay closed: opening one masks the old bug.
+                                      for(let i=0;i<8;i++){
+                                        source.emit('reasoning',{text:'Checking phase '+i});
+                                        source.emit('token',{text:'Progress phase '+i+'. '});
+                                        await new Promise(r=>setTimeout(r,80));
+                                        source.emit('interim_assistant',{text:'Progress phase '+i+'.',already_streamed:true});
+                                        check(true);
+                                        source.emit('interim_assistant',{text:'Completed phase '+i+'.'});
+                                        check(true);
+                                      }
+                                      group.querySelector('.tool-worklog-summary').click();
+                                      source.emit('interim_assistant',{text:'Keep the user-collapsed worklog closed.'});
+                                      check(false);
+                                      group.querySelector('.tool-worklog-summary').click();
+                                      // Legacy burst groups still finalize, even beside a scene owner.
+                                      const legacy=document.createElement('div');
+                                      legacy.className='tool-call-group open';
+                                      legacy.setAttribute('data-live-tool-call-group','1');
+                                      legacy.setAttribute('data-live-activity-current','1');
+                                      document.querySelector('#liveAssistantTurn .assistant-turn-blocks').appendChild(legacy);
+                                      closeCurrentLiveActivityGroup();
+                                      if(legacy.classList.contains('open')||legacy.hasAttribute('data-live-tool-call-group'))throw new Error('legacy burst did not finalize');
+                                      legacy.remove();
+                                      check(true);
+                                    }""")
                                 if not snapshot_path and mode!='hide_all_activity':
                                     # Subsequent real SSE handler updates still paint the existing owner.
                                     updated=page.evaluate("""({sid,stream})=>{
@@ -154,6 +204,23 @@ def main():
                                         result:document.querySelector('#liveAssistantTurn').textContent.includes('LATER RESULT')};
                                     }""",sid)
                                     assert switched==updated,switched
+                                if not snapshot_path:
+                                    settled=page.evaluate("""async sid=>{
+                                      const deadline=performance.now()+5000;
+                                      let source;
+                                      while(!(source=fixtureSources.findLast(s=>s.url.includes('api/chat/stream?')&&s.readyState===1))&&performance.now()<deadline){
+                                        await new Promise(r=>setTimeout(r,10));
+                                      }
+                                      if(!source)throw new Error('chat stream did not reattach');
+                                      source.emit('done',{session:{session_id:sid,active_stream_id:null,
+                                        messages:[{role:'user',content:'Inspect the fixture'},
+                                          {role:'assistant',content:'Fixture complete.'}],tool_calls:[],message_count:2}});
+                                      await new Promise(r=>setTimeout(r,150));
+                                      return {busy:S.busy,live:!!document.getElementById('liveAssistantTurn'),
+                                        owners:document.querySelectorAll('[data-live-anchor-scene-owner="1"]').length,
+                                        final:document.getElementById('msgInner').textContent.includes('Fixture complete.')};
+                                    }""",sid)
+                                    assert settled==dict(busy=False,live=False,owners=0,final=True),settled
                                 if not snapshot_path:
                                     artifact=os.environ.get('SCREENSHOT_DIR')
                                     if artifact:

@@ -15050,6 +15050,9 @@ function closeCurrentLiveActivityGroup(){
   const turn=$('liveAssistantTurn');
   if(!turn) return;
   turn.querySelectorAll('.tool-worklog-group[data-live-tool-call-group="1"][data-live-activity-current="1"],.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
+    // The Anchor scene owns the whole running turn, not just this prose burst.
+    // Interim updates must not collapse it or strip its live ownership markers.
+    if(group.getAttribute('data-live-anchor-scene-owner')==='1') return;
     group.removeAttribute('data-live-activity-current');
     _finalizeLiveActivityDisclosureGroup(group);
   });
