@@ -11288,6 +11288,7 @@ function msgContent(m){
 function _isRecoveryControlMessageText(text){
   const normalized=String(text||'').replace(/\s+/g,' ').trim();
   if(!normalized) return false;
+  if(normalized==='[System: Your previous response contained only internal reasoning and never produced a visible answer or tool call. Do not keep thinking. Produce your final answer as plain text now (or make the tool call you were planning).]') return true;
   const systemRecovery=/^\[System:/i.test(normalized)
     && (/continue exactly where you left off/i.test(normalized)
       || /do not retry the same tool call/i.test(normalized));
