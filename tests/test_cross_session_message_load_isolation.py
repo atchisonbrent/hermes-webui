@@ -88,7 +88,7 @@ def _extract_function(source: str, name: str) -> str:
 
 
 LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession")
-ENSURE_MESSAGES_LOADED_SRC = "\n".join(_extract_function(SESSIONS_SRC, name) for name in ("_loadedMessageBoundarySignature", "_preserveLoadedMessageWindow", "_ensureMessagesLoaded"))
+ENSURE_MESSAGES_LOADED_SRC = "\n".join(_extract_function(SESSIONS_SRC, name) for name in ("_loadedMessageBoundarySignature", "_preserveLoadedMessageWindow", "_restoreActiveTurnWindowBoundary", "_ensureMessagesLoaded"))
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")

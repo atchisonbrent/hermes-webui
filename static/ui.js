@@ -10163,7 +10163,9 @@ async function refreshSession() {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
-    S.messages = data.session.messages || [];
+    S.messages = typeof _reconcileRunningMessageWindow==='function'
+      ? _reconcileRunningMessageWindow(data.session,data.session.messages || [])
+      : (data.session.messages || []);
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
     if (typeof _mergePendingSessionMessage !== 'function') {
@@ -18608,6 +18610,13 @@ function renderMessages(options){
         }
       }
     }
+  }
+  // Restore live DOM ownership first; never build a scene just to discard it
+  // in the preservation swap above. Repaint only a surviving legacy shell.
+  if(S.busy&&S.activeStreamId&&inner.querySelector('#liveAssistantTurn')&&
+    !isLiveAnchorActivitySceneOwner(S.activeStreamId)&&chatActivityMode()!=='hide_all_activity'){
+    _renderLiveAnchorActivitySceneForStream(S.activeStreamId,S.session.session_id);
+    _restoreWorklogDetailDisclosureState(inner,worklogDetailDisclosureState);
   }
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.

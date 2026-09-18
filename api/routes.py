@@ -8776,6 +8776,34 @@ def _tool_result_matches_call_ids(message, call_ids) -> bool:
     return bool(tid) and str(tid) in call_ids
 
 
+def _active_turn_display_boundary(session, messages):
+    """Project the exact pending user identity into merged display coordinates.
+
+    Do not guess from text or a time range: repeated prompts are separate turns.
+    The exact timestamp is a best-effort fallback for rows without the eager
+    token. Rounded, ambiguous or missing identities leave legacy recovery intact.
+    """
+    from api.process_event_utils import build_active_turn_token
+
+    stream_id = getattr(session, "active_stream_id", None)
+    started = getattr(session, "pending_started_at", None)
+    if isinstance(started, bool):
+        return None
+    token = build_active_turn_token(stream_id, started)
+    if not token:
+        return None
+    users = [(i, row) for i, row in enumerate(messages or [])
+             if isinstance(row, dict) and row.get("role") == "user"]
+    exact = [(i, row) for i, row in users if row.get("_active_turn_token") == token]
+    if not exact:
+        exact = [(i, row) for i, row in users
+                 if not isinstance(row.get("timestamp"), bool)
+                 and row.get("timestamp") == float(started)]
+    if len(exact) != 1 or exact[0][0] != users[-1][0]:
+        return None
+    return {"stream_id": stream_id, "user_index": exact[0][0]}
+
+
 def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
     """Return a paginated message window plus its offset in ``messages``.
 
@@ -13560,6 +13588,8 @@ def _handle_session_get(handler, parsed) -> bool:
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+        if load_messages and raw.get("active_stream_id") in active_stream_ids:
+            raw["_active_turn_boundary"] = _active_turn_display_boundary(s, _all_msgs)
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:

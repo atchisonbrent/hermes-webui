@@ -86,6 +86,47 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ---
 
+## Running worklog splits into standalone Thinking rows
+
+A paginated transcript can start halfway through the current turn. Without its
+user-row boundary, saved partial assistant rows can look like settled history,
+separate from the live activity scene. This is distinct from a transport failure.
+
+The session response carries optional `_active_turn_boundary` metadata in the
+same coordinates as `_messages_offset`. It binds `user_index` to `stream_id`,
+using the eager checkpoint token or the unique exact pending-user timestamp in
+the merged transcript. Missing or ambiguous identity retains legacy recovery;
+no nearest-time or repeated-text matching is used. The browser restores the
+pending prompt before that tail, keeps one live owner during history expansion
+and refresh, and repaints its scene after transcript reconstruction. This is a
+display projection; durable transcript rows are not edited.
+
+A live scene registry must also outlive its transport: the ten-minute cleanup
+backstop now defers while the matching stream is open or reconnecting. Previously
+it deleted the registry mid-turn, causing later thinking to use standalone
+fallback cards. Closed/abandoned transports still expire, and stale timers cannot
+delete a replacement registry.
+
+Regression harness: `tests/browser_active_turn_page_boundary.py` exercises
+three cleanup intervals, later reasoning, active-session loading, older history,
+full-history loading and refresh at desktop/phone widths in Chromium and WebKit. Cleanup
+intervals are advanced deterministically, not thirty minutes of wall-clock time.
+These are browser-engine checks, not physical mobile-device certification.
+
+Boundary recovery uses the live journal/INFLIGHT projection for activity while
+the run is active. Recovery of persisted reasoning absent from both sources is
+not repaired here; durable rows remain available after settlement. Rounded
+pending timestamps without a matching checkpoint token use legacy recovery.
+
+## Repeated SSE disconnects during a long run
+
+Each successful current-transport `open` starts a fresh reconnect budget. A prior
+outage must not exhaust retries for the rest of the run; late errors from a
+replaced EventSource are ignored. `tests/browser_repeated_sse_reconnect.py` drives
+three disconnect/recovery cycles with subsequent tool events and stale-source
+errors in Chromium/WebKit. This tests browser recovery logic, not every mobile
+network or proxy failure.
+
 ## "Response interrupted." marker keeps saying "no agent output was recovered"
 
 **Symptom.** After a live response stream stops before a turn completes (manual restart, OOM, crash, browser/SSE disconnect, lost worker bookkeeping, …), the affected chat shows an `**Response interrupted.**` marker. If the run-journal for that turn is already visible on disk, the marker says the partial output was recovered; if not, it preserves the user turn and says no agent output was recovered yet.

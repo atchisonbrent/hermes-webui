@@ -3249,7 +3249,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
   // toast on every mobile message (SSE/visibility events trigger this reload path
   // more aggressively on mobile).
-  let msgs = (data.session.messages || []).filter(m => m && m.role);
+  let msgs = _restoreActiveTurnWindowBoundary(data.session,(data.session.messages || []).filter(m => m && m.role));
   // Skip _syncToolCalls when INFLIGHT exists — the INFLIGHT restore path
   // (loadSession line ~871) will overwrite S.toolCalls from INFLIGHT[sid].toolCalls.
   // Clearing here and then overwriting is wasteful, and if S.busy becomes true
@@ -3383,6 +3383,53 @@ function _sameTranscriptMessage(a,b){
   return false;
 }
 
+function _restoreActiveTurnWindowBoundary(session,messages){
+  const boundary=session&&session._active_turn_boundary;
+  const offset=session&&session._messages_offset;
+  if(!boundary||!session.active_stream_id||boundary.stream_id!==session.active_stream_id||
+    !Number.isInteger(boundary.user_index)||boundary.user_index<0||
+    !Number.isInteger(offset)||offset<0) return messages;
+  const index=boundary.user_index-offset;
+  if(index>=messages.length) return messages; // An older page, not the running tail.
+  if(index>=0){
+    if(messages[index]?.role!=='user') return messages;
+    messages[index]={...messages[index],_active_turn_boundary_stream:boundary.stream_id};
+    if(!messages[index].attachments?.length&&Array.isArray(session.pending_attachments)){
+      messages[index].attachments=session.pending_attachments.filter(Boolean);
+    }
+    return messages.filter((m,i)=>i===index||m?._active_turn_boundary_stream!==boundary.stream_id);
+  }
+  const existing=messages.findIndex(m=>m?.role==='user'&&m._active_turn_boundary_stream===boundary.stream_id);
+  if(existing>=0) return [messages[existing],...messages.filter((m,i)=>i!==existing)];
+  const pending=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,[]):null;
+  return pending?[{...pending,_active_turn_boundary_stream:boundary.stream_id},...messages]:messages;
+}
+
+function _reconcileRunningMessageWindow(session,messages){
+  const inflight=(typeof INFLIGHT!=='undefined'&&INFLIGHT[session?.session_id])||
+    (S.busy&&S.session?.session_id===session?.session_id&&S.activeStreamId===session.active_stream_id
+      ? {streamId:S.activeStreamId,messages:S.messages}:null);
+  if(!inflight||!session.active_stream_id||inflight.streamId!==session.active_stream_id) return messages;
+  const restored=_restoreActiveTurnWindowBoundary(session,messages);
+  if(!restored.some(m=>m?.role==='user'&&m._active_turn_boundary_stream===session.active_stream_id)) return restored;
+  const tail=_projectInflightMessagesForActivityBursts(inflight);
+  if(!_prepareRunningLiveTail(restored,tail)) return restored;
+  return _mergeInflightTailMessages(_dropCurrentTurnAssistantMessages(restored),tail);
+}
+
+function _prependedRunningHistory(nextMessages,currentMessages,fallback){
+  const first=currentMessages[0];
+  if(!first) return nextMessages;
+  const key=typeof _messageViewportAnchorKeyForMessage==='function'?_messageViewportAnchorKeyForMessage(first):'';
+  const matches=[];
+  nextMessages.forEach((msg,index)=>{
+    if(msg===first||
+      (first._active_turn_boundary_stream&&msg?._active_turn_boundary_stream===first._active_turn_boundary_stream)||
+      (key&&_messageViewportAnchorKeyForMessage(msg)===key)) matches.push(index);
+  });
+  return matches.length===1?nextMessages.slice(0,matches[0]):fallback;
+}
+
 function _currentTailUserMessage(messages){
   const list=Array.isArray(messages)?messages:[];
   for(let i=list.length-1;i>=0;i--){
@@ -3402,7 +3449,9 @@ function _currentTailUserMessage(messages){
 function _hasCurrentTailUserDuplicate(messages,candidate){
   if(!candidate||String(candidate.role||'')!=='user') return false;
   const existing=_currentTailUserMessage(messages);
-  return !!(existing&&_sameTranscriptMessage(existing,candidate));
+  return !!(existing&&(
+    (candidate._active_turn_boundary_stream&&existing._active_turn_boundary_stream===candidate._active_turn_boundary_stream)||
+    _sameTranscriptMessage(existing,candidate)));
 }
 
 // Keep pending-user recovery ordering identical across load, reconnect, and
@@ -3410,6 +3459,7 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
 // must be projected before it, regardless of which recovery response arrived.
 function _mergePendingSessionMessage(session,messages){
   if(!Array.isArray(messages)) return false;
+  if(session?.active_stream_id&&messages.some(m=>m?.role==='user'&&m._active_turn_boundary_stream===session.active_stream_id)) return false;
   const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
   const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
   const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
@@ -3876,6 +3926,12 @@ async function _loadOlderMessages() {
     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
       nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
     }
+    const unreconciledMessages=nextMessages;
+    nextMessages = _reconcileRunningMessageWindow(responseSession,nextMessages);
+    // Discarded copies of live activity did not prepend visible history.
+    // Scroll anchoring must use the projected prefix, not the API page length.
+    const prependedMessages=nextMessages===unreconciledMessages?olderMsgs:
+      _prependedRunningHistory(nextMessages,currentMsgs,olderMsgs);
     S.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
     // renderMessages() windows long transcripts from the end. If we do not
@@ -3883,7 +3939,7 @@ async function _loadOlderMessages() {
     // hidden and the "hidden" counter rises while the viewport appears stuck.
     // Count by the same visible-message rules used by renderMessages(); the
     // virtual fallback below uses this as a pixel-height prefix length.
-    const addedRenderable = olderMsgs.filter(m=>{
+    const addedRenderable = prependedMessages.filter(m=>{
       if(typeof _messageIsRenderable==='function') return _messageIsRenderable(m);
       if(!m||!m.role||m.role==='tool') return false;
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)) return false;
@@ -3903,7 +3959,7 @@ async function _loadOlderMessages() {
       // first visible rendered row and restore that row's top offset after the
       // prepend so synthetic virtual spacer heights cannot skew the delta.
       const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
-        ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
+        ? _restoreMessageViewportAnchor(viewportAnchor, prependedMessages.length)
         : false;
       if (!restoredViaAnchor) {
         const virtualAddedHeight = (typeof _messageVirtualPrependedHeightDelta === 'function')
@@ -3982,7 +4038,7 @@ async function _ensureAllMessagesLoaded() {
     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
       _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
     }
-    S.messages = _msgsToAssign;
+    S.messages = _reconcileRunningMessageWindow(data.session,_msgsToAssign);
     _messagesTruncated = false;
     _oldestIdx = 0;
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);

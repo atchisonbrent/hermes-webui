@@ -2754,14 +2754,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
     setTimeout(()=>{
-      if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+      if(_anchorRegistryMap.get(streamId)!==_anchorRegistry) return;
+      const live=LIVE_STREAMS[activeSid];
+      // Age is not a terminal event. Open/connecting transports still need
+      // this registry for every subsequent scene projection and repaint.
+      if(live&&live.streamId===streamId&&live.source&&live.source.readyState!==2){
+        _scheduleAnchorRegistryCleanup(delayMs);
+        return;
+      }
+      _anchorRegistryMap.delete(streamId);
     },delayMs);
   }
-  // Backstop: schedule an identity-guarded cleanup at creation so this shadow
-  // registry self-expires no matter which teardown path the stream takes
-  // (incl. external ones like sidebar cancelSessionStream() that bypass the
-  // in-closure SSE handlers). Explicit terminal-path calls above just expire it
-  // sooner; this guarantees window._liveAnchorRegistries can't grow unbounded.
+  // Backstop: schedule an identity-guarded cleanup at creation. Keep checking
+  // while a transport owns the registry; expire it after teardown (including
+  // external cancellation paths that bypass the in-closure SSE handlers).
+  // Terminal paths also schedule shorter cleanup where appropriate.
   _scheduleAnchorRegistryCleanup(600000);
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
@@ -6685,7 +6692,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    source.addEventListener('open',()=>{
+      // Retry budget belongs to a connection outage, not the entire run.
+      // Only a proven-open current transport can reset it.
+      if(LIVE_STREAMS[activeSid]?.source===source) _reconnectAttempted=false;
+    });
     source.addEventListener('error',async e=>{
+      if(LIVE_STREAMS[activeSid]?.source!==source) return;
       if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
         return;
       }
