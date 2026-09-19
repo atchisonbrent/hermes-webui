@@ -126,7 +126,7 @@ def main():
                                     await new Promise(r=>setTimeout(r,150));
                                   }
                                   renderMessages();_renderUserInputReceipts();
-                                  for(const g of document.querySelectorAll('.tool-worklog-group')){if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();g.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);}
+                                  for(const g of document.querySelectorAll('.tool-worklog-group')){if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();g.querySelectorAll('.compact-ai-update-activity').forEach(n=>n.open=true);}
                                   const pane=document.getElementById('messages');
                                   pane.scrollTop=pane.scrollHeight;
                                   await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));

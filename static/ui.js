@@ -13549,16 +13549,23 @@ function _settledSceneRowsWithUserInputs(rows, streamId, blocks){
 // keyboard/touch disclosure behavior and survive the HTML cache round trip.
 function _compactUpdateShell(key, previous){
   if(previous) return previous;
-  const update=document.createElement('details');
+  const update=document.createElement('div');
   update.className='compact-ai-update';
   update.dataset.compactUpdateKey=key;
-  update.innerHTML='<summary class="compact-ai-update-summary"><span class="compact-ai-update-label"></span><span class="compact-ai-update-preview"></span></summary><div class="compact-ai-update-body"></div>';
-  update.querySelector('.compact-ai-update-label').textContent=t('worklog_ai_update');
-  update.open=_readActivityDisclosureState('compact-update:'+key)==='open';
-  // An inline handler survives the existing innerHTML transcript cache, and
-  // saves only explicit activation (not asynchronous initial toggle events).
-  update.querySelector('summary').setAttribute('onclick',"_writeActivityDisclosureState('compact-update:'+this.parentElement.dataset.compactUpdateKey,!this.parentElement.open)");
+  update.innerHTML='<div class="compact-ai-update-prose"></div><details class="compact-ai-update-activity"><summary class="compact-ai-update-summary"><span class="compact-ai-update-label"></span></summary><div class="compact-ai-update-body"></div></details>';
+  update.querySelector('details').open=_readActivityDisclosureState('compact-update:'+key)==='open';
+  update.querySelector('summary').setAttribute('onclick',"_writeActivityDisclosureState('compact-update:'+this.closest('.compact-ai-update').dataset.compactUpdateKey,!this.parentElement.open)");
   return update;
+}
+function _syncCompactUpdateSummary(update){
+  const body=update.querySelector('.compact-ai-update-body');
+  const tools=Array.from(body.querySelectorAll('.tool-card-row'));
+  const parts=[];
+  if(tools.length) parts.push(_toolWorklogSummary(tools,{live:!!S.busy,toolCount:tools.length}));
+  if(body.querySelector('.agent-activity-thinking')) parts.push(t('thinking'));
+  if(!parts.length&&body.children.length) parts.push(t('processed_elapsed',''));
+  update.querySelector('.compact-ai-update-label').textContent=parts.join(' · ');
+  update.querySelector(':scope > .compact-ai-update-activity').hidden=!body.children.length;
 }
 function _appendCompactUpdateStep(group, anchor, cards, thinkingText, opts){
   const list=_toolWorklogListEl(group);
@@ -13568,14 +13575,13 @@ function _appendCompactUpdateStep(group, anchor, cards, thinkingText, opts){
   update=_compactUpdateShell(key,update);
   if(anchor?.dataset.msgIdx!==undefined) update.dataset.msgIdx=anchor.dataset.msgIdx;
   const body=update.querySelector('.compact-ai-update-body');
-  if(opts?.includeAnchorReason!==false&&!body.querySelector('.msg-body')){
+  if(opts?.includeAnchorReason!==false&&!update.querySelector('.compact-ai-update-prose .msg-body')){
     const html=_worklogReasonHtmlFromAnchor(anchor);
     if(html){
       const prose=document.createElement('div');
       prose.className='assistant-segment';
       prose.innerHTML=`<div class="msg-body">${html}</div>`;
-      body.appendChild(prose);
-      update.querySelector('.compact-ai-update-preview').textContent=_transparentEventPreview(prose.textContent);
+      update.querySelector('.compact-ai-update-prose').appendChild(prose);
     }
   }
   const thinkingKey=opts?.thinkingKey||`reason:${String(thinkingText||'').trim()}`;
@@ -13589,7 +13595,8 @@ function _appendCompactUpdateStep(group, anchor, cards, thinkingText, opts){
   const nodes=Array.from(body.children).flatMap(node=>node.matches('.wl-step-tools')?Array.from(node.querySelectorAll('.tool-card-row')):[node]);
   for(const tc of _filterNewWorklogTools(cards,opts?.seenTools)) nodes.push(buildToolCard(tc));
   _placeCompactUpdateChildren(body,nodes,opts);
-  if(body.children.length&&!update.parentElement) list.appendChild(update);
+  _syncCompactUpdateSummary(update);
+  if((body.children.length||update.querySelector('.compact-ai-update-prose').children.length)&&!update.parentElement) list.appendChild(update);
 }
 function _placeCompactUpdateChildren(body, nodes, opts){
   const children=[];
@@ -13623,7 +13630,7 @@ function _placeCompactUpdateChildren(body, nodes, opts){
   for(const [index,step] of steps.entries()){
     _syncToolRowsContainer(step,!!opts?.live);
     const group=step.querySelector(':scope > .tool-group,:scope > .tool-worklog-tool-group');
-    if(group) group.setAttribute('data-tool-group-disclosure-key',`update:${body.parentElement.dataset.compactUpdateKey}:step:${index}`);
+    if(group) group.setAttribute('data-tool-group-disclosure-key',`update:${body.closest('.compact-ai-update').dataset.compactUpdateKey}:step:${index}`);
   }
 }
 function _renderCompactUpdateRows(group, rows, opts){
@@ -13662,11 +13669,10 @@ function _renderCompactUpdateRows(group, rows, opts){
       nodes.push(node);
     }
     if(!nodes.length) continue;
-    const prose=batchRows.find(r=>r.role==='prose');
-    const preview=update.querySelector('.compact-ai-update-preview');
-    const text=prose?_transparentEventPreview(prose.text):'';
-    if(preview.textContent!==text) preview.textContent=text;
-    _placeCompactUpdateChildren(body,nodes,opts);
+    const proseNodes=nodes.filter(n=>n.getAttribute('data-anchor-row-role')==='prose');
+    _anchorScenePlaceChildren(update.querySelector('.compact-ai-update-prose'),proseNodes);
+    _placeCompactUpdateChildren(body,nodes.filter(n=>!proseNodes.includes(n)),opts);
+    _syncCompactUpdateSummary(update);
     children.push(update);
   }
   _anchorScenePlaceChildren(list,children);

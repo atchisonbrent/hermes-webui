@@ -3770,8 +3770,7 @@ body.resizing .sidebar{transition:none!important;}
 .activity.open .activity-body{max-height:none;overflow:visible;opacity:1;margin-top:10px;}
 .compact-ai-update{min-width:0;}
 .compact-ai-update-summary{cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:8px 0;font-size:12px;color:var(--muted);}
-.compact-ai-update-label{margin-right:8px;}
-.compact-ai-update-preview{color:var(--text);}
+.compact-ai-update-prose{padding-top:8px;}
 .compact-ai-update-body{padding:4px 0 8px 12px;min-width:0;}
 .tool-worklog-list{
   --worklog-rail:24px;

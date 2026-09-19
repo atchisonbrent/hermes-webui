@@ -56,7 +56,7 @@ def main():
                                   const inner=$('msgInner');
                                   for(const group of inner.querySelectorAll('.tool-worklog-group')){
                                     if(!group.classList.contains('open'))group.querySelector('.tool-worklog-summary').click();
-                                    group.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);
+                                    group.querySelectorAll('.compact-ai-update-activity').forEach(n=>n.open=true);
                                   }
                                   const text=inner.innerText;
                                   const a=text.indexOf('Delivered important result.');

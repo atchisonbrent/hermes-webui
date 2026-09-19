@@ -131,15 +131,17 @@ inline with activity in Transparent Stream, and among assistant updates in compa
 mode. Later work therefore appears below the answer/steer instead of pushing
 a trailing receipt along the bottom. These rows are not written into the Anchor
 registry or model messages. Compact mode uses a nested hierarchy:
-**Processed → AI updates → update text, thinking and tools**. Each update has a
-single-line summary and an independent disclosure; its thinking and tools collapse
-with it. Intermediate updates remain available after completion, reload and cache
-restoration. The final answer stays outside Processed. This supersedes the earlier
-presentation that detached updates from the worklog.
+**Processed → readable assistant updates → collapsible activity summaries**.
+Assistant status text is not a disclosure: it remains readable whenever the outer
+Processed block is open. A separate single-line summary below each update groups
+its tool calls and thinking; only those supporting details collapse. Updates remain
+available after completion, reload and cache restoration. The final answer stays
+outside Processed. This supersedes both detached updates and the intermediate
+presentation that put the update text itself behind a dropdown.
 
 Scene rows retain their chronological order inside updates. Thinking preceding an
-update is included with that update; activity without prose receives an AI-update
-entry too. Legacy history groups prose and activity by their assistant anchor.
+update is included beneath that update; activity without prose receives an
+activity-only summary. Legacy history groups prose and activity by their assistant anchor.
 Consecutive tools retain their existing expandable tool-group summary inside the
 owning update, with independent disclosure keys. Recovered persisted updates with
 no timestamp are appended after the recorded scene rows rather than assigned an

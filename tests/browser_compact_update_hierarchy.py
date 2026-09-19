@@ -77,11 +77,11 @@ def main():
                                 assert group.count()==1, 'Missing Processed'
                                 if not group.evaluate("g=>g.classList.contains('open')"):
                                     group.locator('.tool-worklog-summary').tap()
-                                updates=group.locator('details.compact-ai-update')
+                                updates=group.locator('.compact-ai-update')
                                 expected_updates=3 if os.environ.get('MISSING')=='1' else 2
                                 assert updates.count()==expected_updates, f'{stage}: expected {expected_updates} AI-update disclosures, got {updates.count()}'
                                 if os.environ.get('MISSING')=='1':
-                                    assert 'Persisted update absent from old scene.' in updates.last.locator('.compact-ai-update-body').text_content()
+                                    assert 'Persisted update absent from old scene.' in updates.last.locator('.compact-ai-update-prose').text_content()
                                 assert page.locator('[data-user-input-id="receipt"]').count()==1, 'Receipt duplicated'
                                 assert page.evaluate("""()=>{
                                     const r=document.querySelector('[data-user-input-id="receipt"]');
@@ -96,8 +96,12 @@ def main():
                                     assert f'Reasoning {marker.upper()}' in thought.text_content()
                                     prose=update.locator('.msg-body').first
                                     assert ['Checking the first component.','Checking the second component.'][i] in prose.text_content()
+                                    assert prose.is_visible(), 'AI status text must remain visible while its activity is collapsed'
+                                    assert not thought.is_visible(), 'Activity should start collapsed beneath visible status text'
+                                    assert 'Checking' not in update.locator('summary').text_content()
+                                    assert 'Thinking' in update.locator('summary').text_content()
                                     update.locator('summary').tap()
-                                    assert update.evaluate('n=>n.open')
+                                    assert update.locator('details').evaluate('n=>n.open')
                                     assert prose.is_visible()
                                     if i==0 and stage=='load' and os.environ.get('SCREENSHOT_DIR'):
                                         target=Path(os.environ['SCREENSHOT_DIR']);target.mkdir(parents=True,exist_ok=True)
@@ -109,8 +113,8 @@ def main():
                                 group=page.locator('.tool-worklog-group').first
                                 if not group.evaluate("g=>g.classList.contains('open')"):
                                     group.locator('.tool-worklog-summary').tap()
-                                assert group.locator('details.compact-ai-update').first.evaluate('n=>n.open'), 'Update disclosure lost on rerender'
-                                group.locator('details.compact-ai-update').first.locator('summary').tap()
+                                assert group.locator('.compact-ai-update').first.locator('details').evaluate('n=>n.open'), 'Update disclosure lost on rerender'
+                                group.locator('.compact-ai-update').first.locator('summary').tap()
                                 assert page.locator('.anchor-conversation').count()==0, 'Detached updates remain'
                                 assert page.locator('.assistant-segment').filter(has_text='All checks complete.').last.is_visible()
                                 group.locator('.tool-worklog-summary').tap()
@@ -128,6 +132,11 @@ def main():
                                 for(const [anchor,prefix] of [[a,'a'],[b,'b']]){
                                     _appendWorklogStep(host,anchor,[{name:'terminal',id:prefix+'1',args:{command:'one'}},{name:'terminal',id:prefix+'2',args:{command:'two'}}],'',opts);
                                 }
+                                const c=document.createElement('div');c.className='assistant-segment';c.dataset.msgIdx='3';
+                                c.innerHTML='<div class="msg-body">Readable status<details class="provider-error-details"><summary>Diagnostic detail</summary>Preserved detail</details></div>';
+                                _appendWorklogStep(host,c,[],'',opts);
+                                const plain=host.querySelectorAll('.compact-ai-update')[2];
+                                if(plain.querySelector('.provider-error-details').hidden||!plain.querySelector('.compact-ai-update-activity').hidden)throw new Error('Activity-only selector hid prose details or left empty summary');
                                 const groups=[...host.querySelectorAll('.compact-ai-update .tool-group')];
                                 if(groups.length!==2||groups.some(g=>g.querySelectorAll('.tool-card-row').length!==2)||new Set(groups.map(g=>g.dataset.toolGroupDisclosureKey)).size!==2)throw new Error('Legacy update tool grouping lost or disclosure keys collide');
                             }""")

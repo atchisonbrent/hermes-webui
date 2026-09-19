@@ -54,7 +54,7 @@ def main():
                             page.evaluate("async()=>await loadSession('fixture')")
                             page.wait_for_timeout(500)
                             result = page.evaluate("""async()=>{
-                              document.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);
+                              document.querySelectorAll('.compact-ai-update-activity').forEach(n=>n.open=true);
                               const select=()=>Array.from(document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role="tool"]'));
                               const before=select();
                               const source=fixtureSources.findLast(s=>s.url.includes('api/chat/stream?')&&s.readyState===1);
