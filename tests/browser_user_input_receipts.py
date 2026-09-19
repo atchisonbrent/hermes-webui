@@ -98,10 +98,10 @@ def main():
                                   const before=Array.from(document.querySelectorAll('[data-anchor-scene-row="1"]')).find(n=>n.textContent.includes('Work before the answer'));
                                   const tool=document.querySelector('[data-anchor-local-id="later-tool"]');
                                   return {afterEarlierProse:mode==='hide_all_activity'?null:!!before&&!!(before.compareDocumentPosition(answer)&Node.DOCUMENT_POSITION_FOLLOWING),answerBeforeProse:!!later&&!!(answer.compareDocumentPosition(later)&Node.DOCUMENT_POSITION_FOLLOWING),
-                                    answerBeforeTool:mode==='hide_all_activity'?null:!!tool&&!!(answer.compareDocumentPosition(tool)&Node.DOCUMENT_POSITION_FOLLOWING),
+                                    answerBeforeTool:mode!=='transparent_stream'?null:!!tool&&!!(answer.compareDocumentPosition(tool)&Node.DOCUMENT_POSITION_FOLLOWING),
                                     rows:document.querySelectorAll('.user-input-receipt').length};
                                 }""",mode)
-                                assert timeline==dict(afterEarlierProse=None if mode=='hide_all_activity' else True,answerBeforeProse=True,answerBeforeTool=None if mode=='hide_all_activity' else True,rows=4),timeline
+                                assert timeline==dict(afterEarlierProse=None if mode=='hide_all_activity' else True,answerBeforeProse=True,answerBeforeTool=True if mode=='transparent_stream' else None,rows=4),timeline
                                 page.evaluate("""mode=>{
                                   for(const next of ['transparent_stream','hide_all_activity','compact_worklog',mode]){
                                     window._chatActivityDisplayMode=next;renderMessages();_renderUserInputReceipts();

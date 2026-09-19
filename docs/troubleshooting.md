@@ -126,14 +126,22 @@ messages, and cannot cause turn recovery or replay the input. Session responses
 return them separately as `_user_inputs` when messages are requested, not on
 metadata-only polls. Receipt content uses the existing API credential redaction
 on both accepted responses and later loads. While an Anchor-owned run is live,
-its display projection interleaves escaped receipt rows with activity by recorded
-timestamp; later work therefore appears below the answer/steer instead of pushing
+its display projection places escaped receipt rows by recorded timestamp:
+inline with activity in Transparent Stream, and among assistant updates in compact
+mode. Later work therefore appears below the answer/steer instead of pushing
 a trailing receipt along the bottom. These rows are not written into the Anchor
-registry or model messages. Compact receipts follow the worklog disclosure while
-live; Transparent Stream places them inline. Without an activity scene (including
-Final answer only), receipts precede the live output rather than trailing it.
-Settled receipts remain before the final answer. Rows without event timestamps
+registry or model messages. For Anchor-scene turns, compact mode keeps assistant
+updates and receipts outside Processed; receipts interleave with updates while
+tool and thinking details stay grouped in the disclosure.
+Collapsing it, finishing a run, and expanding it again must not hide or duplicate
+assistant output. Transparent Stream places receipts inline. Without an activity
+scene (including Final answer only), receipts precede the live output rather than
+trailing it. After settlement, recorded timestamps place receipts before the next
+known assistant update, or before the final answer when no later update exists.
+Older conversations without scenes also keep assistant prose visible. Rows without event timestamps
 keep their original scene order; precise interleaving requires recorded timestamps.
+A timestamp-free scene row can use the matching rendered message time, but text
+changed beyond whitespace (for example stripped display markers) may not match.
 Receipt times are normalized to seconds; a receipt with no usable timestamp is
 placed before activity rather than following the growing tail.
 Repeated rendering, including cached restores, dedupes by receipt ID rather than
