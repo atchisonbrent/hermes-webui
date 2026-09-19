@@ -33,7 +33,7 @@ def main():
                     browser = getattr(pw,engine).launch()
                     try:
                         for mode in ['compact_worklog','transparent_stream','hide_all_activity']:
-                            context = browser.new_context(viewport={'width':390,'height':844},bypass_csp=True)
+                            context = browser.new_context(viewport={'width':390,'height':844},has_touch=True,is_mobile=True,bypass_csp=True)
                             context.add_init_script(INIT)
                             page = context.new_page()
                             page.route('**/api/session?*',lambda r:r.fulfill(json={'session':data}))
@@ -58,8 +58,59 @@ def main():
                                   return {visible:a>=0&&b>=0,ordered:a<b&&b<c,steerBeforeOutput:text.indexOf('Include steers too')<a,
                                     copies:text.split('Delivered important result.').length-1,busy:S.busy};
                                 }""",stage)
+                                if mode=='compact_worklog':
+                                    assert page.evaluate("""()=>{
+                                      const group=document.querySelector('.tool-worklog-group');
+                                      return group.nextElementSibling?.innerText.includes('Verification complete.');
+                                    }"""),'Legacy worklog is separated from conclusion'
                                 print(engine,mode,stage,result,flush=True)
                                 assert result==dict(visible=True,ordered=True,steerBeforeOutput=True,copies=1,busy=False),result
+                            if mode=='compact_worklog':
+                                # Make updates span many mobile screens without hiding them.
+                                page.evaluate("""()=>{
+                                  S.messages.splice(2,0,...Array.from({length:40},(_,i)=>({role:'assistant',content:`Progress ${i}. `+'Long update. '.repeat(20),timestamp:4.1+i/100})));
+                                  clearMessageRenderCache();renderMessages();
+                                }""")
+                                summary=page.locator('.tool-worklog-summary').last
+                                summary.scroll_into_view_if_needed()
+                                state = {}
+                                initially_open=page.locator('.tool-worklog-group').evaluate("g=>g.classList.contains('open')")
+                                for repeat in range(4):
+                                    summary.tap()
+                                    assert page.locator('.tool-worklog-group').evaluate("g=>g.classList.contains('open')") == (not initially_open if repeat%2==0 else initially_open)
+                                    page.wait_for_timeout(1500)
+                                    state=page.evaluate("""()=>{
+                                      const g=document.querySelector('.tool-worklog-group');
+                                      const header=g.querySelector('button').getBoundingClientRect();
+                                      return {groups:document.querySelectorAll('.tool-worklog-group').length,
+                                        atConclusion:g.nextElementSibling?.innerText.includes('Verification complete.'),
+                                        headerVisible:header.bottom>53&&header.top<720,
+                                        tools:g.querySelectorAll('.tool-card-row').length};
+                                    }""")
+                                    assert state==dict(groups=1,atConclusion=True,headerVisible=True,tools=1),state
+                                edge=page.evaluate("""()=>{
+                                  const group=document.querySelector('.tool-worklog-group');
+                                  const blocks=group.parentElement;
+                                  const final=group.nextElementSibling;
+                                  const empty=document.createElement('div');
+                                  empty.className='assistant-segment assistant-segment-anchor';
+                                  blocks.appendChild(empty);
+                                  _placeSettledCompactWorklogs($('msgInner'));
+                                  const excludesPlaceholder=group.nextElementSibling===final;
+                                  empty.remove();
+                                  const second=group.cloneNode(true);
+                                  final.before(second);
+                                  _placeSettledCompactWorklogs($('msgInner'));
+                                  const observer=new MutationObserver(()=>{});
+                                  observer.observe(blocks,{childList:true});
+                                  _placeSettledCompactWorklogs($('msgInner'));
+                                  const moves=observer.takeRecords().length;
+                                  const ordered=group.nextElementSibling===second&&second.nextElementSibling===final;
+                                  observer.disconnect();second.remove();
+                                  return {excludesPlaceholder,moves,ordered};
+                                }""")
+                                assert edge==dict(excludesPlaceholder=True,moves=0,ordered=True),edge
+                                print(engine,'long-touch',state,'edges',edge,flush=True)
                             context.close()
                     finally:browser.close()
         finally:

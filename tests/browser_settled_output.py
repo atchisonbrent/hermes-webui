@@ -60,12 +60,17 @@ def main():
                                   while(!LIVE_STREAMS.fixture?.source&&performance.now()<end)await new Promise(r=>setTimeout(r,10));
                                   const source=LIVE_STREAMS.fixture.source;
                                   source.emit('reasoning',{text:'Internal reasoning fixture.',timestamp:1.5,event_id:'run-fixture:1000a'});
+                                  // Exceed the incremental parser's 32-entry cache: unchanged
+                                  // conversation DOM must not be rebuilt on each live redraw.
+                                  for(let i=0;i<60;i++)source.emit('interim_assistant',{
+                                    text:`Extended progress ${i}. `+'Verification continues. '.repeat(25),
+                                    timestamp:1.6+i/1000,event_id:`run-fixture:long-${i}`});
                                   source.emit('interim_assistant',{text:'Earlier progress',timestamp:2,event_id:'run-fixture:1001'});
                                   source.emit('interim_assistant',{text:'The requested fix is deployed. Here is the important result.',timestamp:4,event_id:'run-fixture:1002'});
                                   source.emit('tool',{name:'terminal',tid:'verify',args:{command:'printf checked'},timestamp:5});
                                   source.emit('tool_complete',{name:'terminal',tid:'verify',result:'checked',timestamp:6});
                                   source.emit('interim_assistant',{text:'Additional verification passed.',timestamp:7,event_id:'run-fixture:1005'});
-                                  source.emit('token',{text:'Final test confirmation.',timestamp:8});
+                                  source.emit('token',{text:'Final test confirmation.',timestamp:8,event_id:'run-fixture:final-token'});
                                   await new Promise(r=>setTimeout(r,100));
                                 }""")
                                 if mode == 'compact_worklog':
@@ -94,6 +99,34 @@ def main():
                                         adjacent:group.nextElementSibling===conversation};
                                     }""")
                                     assert retained == dict(containers=1,retained=True,adjacent=True),retained
+                                    page.evaluate("""()=>{
+                                      const host=document.createElement('div');
+                                      const group=document.createElement('div');host.appendChild(group);
+                                      const row={role:'prose',row_id:'retention-check',text:'Original **content**'};
+                                      _renderCompactConversationRows(group,[row],{settled:true});
+                                      const original=host.querySelector('[data-anchor-row-id]');
+                                      _renderCompactConversationRows(group,[{...row}],{settled:true});
+                                      if(host.querySelector('[data-anchor-row-id]')!==original)throw new Error('Unchanged prose rebuilt');
+                                      _renderCompactConversationRows(group,[{...row,text:'Corrected **content**'}],{settled:true});
+                                      const changed=host.querySelector('[data-anchor-row-id]');
+                                      if(changed===original||!changed.textContent.includes('Corrected content'))throw new Error('Prose correction stale');
+                                      _renderCompactConversationRows(group,[],{settled:true});
+                                      if(host.querySelector('[data-anchor-row-id]'))throw new Error('Removed prose retained');
+                                      const anonymous={role:'prose',text:'Anonymous repeated update'};
+                                      _renderCompactConversationRows(group,[anonymous,{...anonymous}],{settled:true});
+                                      _renderCompactConversationRows(group,[anonymous,{...anonymous}],{settled:true});
+                                      if(host.querySelector('.anchor-conversation').children.length!==2)throw new Error('Anonymous prose collapsed');
+                                      const savedFade=window._fadeTextEffect;
+                                      const liveRow={role:'prose',row_id:'fade-check',text:'Live fade check'};
+                                      try{
+                                        window._fadeTextEffect=false;
+                                        _renderCompactConversationRows(group,[liveRow],{settled:false});
+                                        if(host.querySelector('.stream-fade-active'))throw new Error('Fade unexpectedly active');
+                                        window._fadeTextEffect=true;
+                                        _renderCompactConversationRows(group,[liveRow],{settled:false});
+                                        if(!host.querySelector('.stream-fade-active'))throw new Error('Fade toggle did not invalidate retained prose');
+                                      }finally{window._fadeTextEffect=savedFade;}
+                                    }""")
                                     cleanup=page.evaluate("""()=>{
                                       const original=$('liveAssistantTurn').querySelector('.anchor-conversation');
                                       clearLiveToolCards({preserveDom:true});
@@ -115,6 +148,15 @@ def main():
                                                       dict(role='assistant', content='Final test confirmation.', timestamp=8)], message_count=8)
                                 page.evaluate("session=>LIVE_STREAMS.fixture.source.emit('done',{session})", data)
                                 page.wait_for_timeout(100)
+                                if mode=='compact_worklog':
+                                    page.evaluate("""()=>{
+                                      _rememberUserInputReceipt('fixture',{input_id:'late-receipt',kind:'steer',content:'Late receipt',stream_id:'run-fixture',timestamp:7.9});
+                                      const row=document.querySelector('[data-user-input-id="late-receipt"]');
+                                      const group=document.querySelector('[data-anchor-settled-scene-owner="1"]');
+                                      if(!group)throw new Error('Settled disclosure missing before late receipt check');
+                                      if(!row||!(row.compareDocumentPosition(group)&Node.DOCUMENT_POSITION_FOLLOWING))throw new Error('Late receipt stranded after disclosure');
+                                      S._userInputs.delete('late-receipt');row.remove();
+                                    }""")
                                 for stage in ['settled', 'expanded', 'rerender', 'reload', 'cache', 'older-scene']:
                                     if stage == 'older-scene':
                                         scene=data['messages'][-1]['_anchor_activity_scene']
@@ -156,6 +198,15 @@ def main():
                                         receiptsVisible:[...inner.querySelectorAll('.user-input-receipt')].every(n=>visible(n)&&!n.closest('.tool-worklog-group')),
                                         receipts:inner.querySelectorAll('.user-input-receipt').length};
                                     }""")
+                                    if mode=='compact_worklog':
+                                        placement=page.evaluate("""()=>{
+                                          const group=document.querySelector('[data-anchor-settled-scene-owner="1"]');
+                                          const final=[...document.querySelectorAll('.assistant-segment')].find(n=>!n.hidden&&n.innerText.includes('Final test confirmation.'));
+                                          const updates=document.querySelector('.anchor-conversation');
+                                          return {atConclusion:!!group&&!!final&&group.nextElementSibling===final,
+                                            afterUpdates:!!updates&&!!(updates.compareDocumentPosition(group)&Node.DOCUMENT_POSITION_FOLLOWING)};
+                                        }""")
+                                        assert placement==dict(atConclusion=True,afterUpdates=True),placement
                                     print(engine, mode, width, stage, result, flush=True)
                                     assert result['outputVisible'], 'Produced answer vanished'
                                     if mode=='compact_worklog' and stage!='expanded':assert not result['thinkingExposed'],result

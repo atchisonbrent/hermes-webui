@@ -13534,7 +13534,15 @@ function _renderCompactConversationRows(group, rows, opts){
     if(row.role!=='prose'&&row.role!=='user_input') continue;
     const key=String(row.row_id||row.local_id||'');
     const previous=existing.get(key);
-    const signature=_anchorSceneRetainedRowSignature(row,opts);
+    // The incremental parser cache is bounded across turns. Retain unchanged
+    // prose from this conversation's DOM too, so a long live turn cannot churn
+    // every row merely because its parser entries exceeded that cache.
+    const signature=row.role==='prose'
+      ? (key ? JSON.stringify([row,opts||{},document.documentElement.lang,
+        window._fadeTextEffect===true,
+        typeof isTransparentStream==='function'&&isTransparentStream(),
+        !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches]) : null)
+      : _anchorSceneRetainedRowSignature(row,opts);
     const node=signature&&previous&&previous._anchorRowRenderSignature===signature
       ? previous : _anchorSceneNodeForRow(row,opts);
     if(!node) continue;
@@ -17063,6 +17071,7 @@ function _rememberUserInputReceipt(sid,receipt){
   if(S._userInputsSessionId!==sid){S._userInputsSessionId=sid;S._userInputs=new Map();}
   S._userInputs.set(receipt.input_id,receipt);
   _renderUserInputReceipts();
+  _placeSettledCompactWorklogs($('msgInner'));
 }
 
 // Display-only rows: never insert these into the registry or model messages.
@@ -17101,6 +17110,28 @@ function _userInputReceiptNode(receipt,row){
   return row;
 }
 
+// A settled disclosure belongs beside the conclusion, not before a potentially
+// hour-long sequence of visible progress updates. Move only the existing group;
+// its disclosure state, event handlers and lazily materialized rows stay owned.
+function _placeSettledCompactWorklogs(inner){
+  if(!isCompactWorklogMode()||!inner) return;
+  for(const turn of inner.querySelectorAll('.assistant-turn')){
+    if(turn.id==='liveAssistantTurn') continue;
+    const blocks=_assistantTurnBlocks(turn);
+    if(!blocks) continue;
+    const segments=Array.from(blocks.querySelectorAll(':scope > .assistant-segment'))
+      .filter(node=>!node.hidden&&!node.classList.contains('assistant-segment-anchor')&&!node.classList.contains('assistant-segment-worklog-source')&&node.style.display!=='none');
+    const finalSegment=segments[segments.length-1];
+    if(!finalSegment) continue;
+    let next=finalSegment;
+    const groups=Array.from(blocks.querySelectorAll(':scope > .tool-worklog-group'));
+    for(let i=groups.length-1;i>=0;i--){
+      const group=groups[i];
+      if(group.nextElementSibling!==next) next.before(group);
+      next=group;
+    }
+  }
+}
 function _renderUserInputReceipts(){
   const inner=$('msgInner');
   const sid=S.session?.session_id;
@@ -17235,6 +17266,7 @@ function renderMessages(options){
       _rehydrateTransparentStreamDom(inner);
       _rehydrateDeferredWorklogsFromCache(inner);
       _renderUserInputReceipts();
+      _placeSettledCompactWorklogs(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
@@ -18844,6 +18876,7 @@ function renderMessages(options){
     _restoreWorklogDetailDisclosureState(inner,worklogDetailDisclosureState);
   }
   _renderUserInputReceipts();
+  _placeSettledCompactWorklogs(inner);
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.

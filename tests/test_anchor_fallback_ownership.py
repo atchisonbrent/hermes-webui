@@ -452,6 +452,13 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
             this.children.push(child);
             return child;
           }}
+          get nextElementSibling() {{
+            return this.parentElement?.children[this.parentElement.children.indexOf(this)+1] || null;
+          }}
+          before(child) {{
+            child.remove();
+            this.parentElement.insertBefore(child, this);
+          }}
           insertBefore(child, ref) {{
             child.parentElement = this;
             const idx = this.children.indexOf(ref);
@@ -694,6 +701,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
         eval({json.dumps(_function_source(_ui_js(), "_renderUserInputReceipts"))});
+        eval({json.dumps(_function_source(_ui_js(), "_placeSettledCompactWorklogs"))});
         eval({json.dumps(render_source)});
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
