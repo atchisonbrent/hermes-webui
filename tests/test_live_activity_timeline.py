@@ -93,7 +93,7 @@ def test_settled_final_answer_segment_is_not_folded_into_worklog():
     helper = _function_source(UI_JS, "_assistantMessageBelongsInWorklog")
     render_fn = UI_JS.split("const messageBelongsInWorklog=", 1)[1].split("if(_ERR_MSG_RE", 1)[0]
 
-    assert "hasVisibleText&&isTurnFinalAssistant" in helper
+    assert "if(hasVisibleText) return false;" in helper
     assert "return false;" in helper
     assert "{isTurnFinalAssistant}" in render_fn
     assert "assistant-segment-worklog-source" in render_fn

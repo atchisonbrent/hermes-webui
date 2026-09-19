@@ -11418,12 +11418,11 @@ function _assistantTurnBlocks(turn){
 function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, visibleContent, opts){
   if(!m||m.role!=='assistant') return false;
   if(m._error) return false;
-  const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
   if(m._live) return true;
-  if(hasVisibleText&&m._anchor_activity_scene) return false;
-  if(hasVisibleText&&isTurnFinalAssistant) return false;
+  // Settled assistant prose remains conversation, even when later tools ran.
+  if(hasVisibleText) return false;
   if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return true;
   const hasToolMetadata=!!(
     (toolCallAssistantIdxs&&toolCallAssistantIdxs.has(rawIdx))||
@@ -12776,7 +12775,7 @@ function _deferredWorklogRowsFromGroup(group){
   const msg=S.messages&&S.messages[Number(m[1])];
   const scene=msg&&msg._anchor_activity_scene;
   if(!scene) return null;
-  return _anchorSceneRowsForRendering(scene,{settled:true});
+  return _anchorSceneRowsForRendering(scene,{settled:true}).filter(row=>row.role!=='prose'&&row.role!=='user_input');
 }
 function _rehydrateDeferredWorklogsFromCache(root){
   // After restoring a transcript from _sessionHtmlCache, deferred settled
@@ -13152,6 +13151,32 @@ function _anchorSceneRowsForRendering(scene, opts){
       out.push(row);
     }
   }
+  if(settled){
+    // A provider can persist text/tool/text as separate prose rows while the
+    // live scene already contains the joined narration. Reconcile that one
+    // message as a unit; never discard individual short text fragments alone.
+    const groups=new Map();
+    const liveTexts=new Set();
+    for(const row of out){
+      if(row.role!=='prose') continue;
+      const idx=row.group?.assistant_msg_idx??row.payload?.assistant_msg_idx;
+      if(row.source_event_type==='settled_message'&&idx!==undefined&&idx!==null){
+        if(!groups.has(idx)) groups.set(idx,[]);
+        groups.get(idx).push(row);
+      }else liveTexts.add(proseTextKey(row.text));
+    }
+    const joined=new Map();
+    const redundant=new Set();
+    for(const parts of groups.values()){
+      if(parts.length<2) continue;
+      const text=parts.map(row=>row.text).join('\n');
+      for(const row of parts){
+        if(liveTexts.has(proseTextKey(text))) redundant.add(row);
+        else joined.set(row,text);
+      }
+    }
+    return out.filter(row=>!redundant.has(row)).map(row=>joined.has(row)?{...row,_proseMessageText:joined.get(row)}:row);
+  }
   return out;
 }
 function _anchorSceneIsSettledSuccessfulCompression(row, settled){
@@ -13327,7 +13352,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     if(!text) return null;
     const finalAnswer=String((opts&&opts.finalAnswer)||'').trim();
     if(opts&&opts.liveTokenFinalPrefixEligible&&_anchorSceneLiveTokenFinalPrefix(row,text,finalAnswer)) return null;
-    if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)) return null;
+    if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||text,finalAnswer)) return null;
     node=_anchorSceneNodeForRow(row,{settled});
     if(!node) return null;
     node=_decorateTransparentEventRow(node,{type:'prose',text,preview:text,...meta});
@@ -13469,6 +13494,54 @@ function _anchorScenePlaceChildren(parent, nodes){
     if(node.parentNode!==parent||node.nextSibling!==next) parent.insertBefore(node,next);
     next=node;
   }
+}
+// Assistant prose is conversation, not supporting activity. Keep its nodes
+// outside the disclosure so collapsing tools never conceals delivered output.
+function _settledSceneRowsWithUserInputs(rows, streamId, blocks){
+  const messageTimes=new Map();
+  for(const node of blocks.querySelectorAll('.assistant-segment[data-msg-idx]')){
+    const message=S.messages[Number(node.dataset.msgIdx)];
+    if(!message) continue;
+    const rendered=String(node.getAttribute('data-raw-text')||'');
+    const canonical=Array.isArray(message.content)
+      ? message.content.filter(part=>part&&part.type==='text').map(part=>part.text||part.content||'').join('\n')
+      : msgContent(message);
+    for(const value of [rendered,canonical]){
+      const key=String(value||'').replace(/\s+/g,' ').trim();
+      if(key&&!messageTimes.has(key)) messageTimes.set(key,message._ts||message.timestamp);
+    }
+  }
+  const timedRows=rows.map(row=>{
+    if(row.role!=='prose'||_anchorSceneRowTimestampSeconds(row)) return row;
+    const timestamp=messageTimes.get(String(row._proseMessageText||row.text||'').replace(/\s+/g,' ').trim());
+    return timestamp?{...row,timestamp}:row;
+  });
+  return _liveSceneRowsWithUserInputs(timedRows,streamId);
+}
+function _renderCompactConversationRows(group, rows, opts){
+  let conversation=group.nextElementSibling;
+  const hasConversation=conversation?.classList.contains('anchor-conversation');
+  if(!hasConversation&&!rows.some(row=>row.role==='prose'||row.role==='user_input')) return;
+  if(!hasConversation){
+    conversation=document.createElement('div');
+    conversation.className='anchor-conversation';
+    group.after(conversation);
+  }
+  const existing=new Map(Array.from(conversation.querySelectorAll('[data-anchor-row-id]'))
+    .map(node=>[node.getAttribute('data-anchor-row-id'),node]));
+  const nodes=[];
+  for(const row of rows){
+    if(row.role!=='prose'&&row.role!=='user_input') continue;
+    const key=String(row.row_id||row.local_id||'');
+    const previous=existing.get(key);
+    const signature=_anchorSceneRetainedRowSignature(row,opts);
+    const node=signature&&previous&&previous._anchorRowRenderSignature===signature
+      ? previous : _anchorSceneNodeForRow(row,opts);
+    if(!node) continue;
+    node._anchorRowRenderSignature=signature;
+    nodes.push(node);
+  }
+  _anchorScenePlaceChildren(conversation,nodes);
 }
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
@@ -13762,11 +13835,12 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
   const activityKey=`live:${streamId||S.activeStreamId||'anchor'}`;
   const retainedGroup=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+  const retainedConversation=retainedGroup?.nextElementSibling?.classList.contains('anchor-conversation')?retainedGroup.nextElementSibling:null;
   blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
-    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))&&!(retainedConversation&&retainedConversation.contains(el))) el.remove();
   });
   blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
-    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))&&!(retainedConversation&&retainedConversation.contains(el))) el.remove();
   });
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
     el.classList.add('assistant-segment-worklog-source');
@@ -13780,7 +13854,8 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     streamId:streamId||S.activeStreamId||'',
     turnStartedAt:S.session&&S.session.pending_started_at,
   });
-  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false});
+  _renderCompactConversationRows(group,rows,{live:true,settled:false});
+  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows.filter(row=>row.role!=='prose'&&row.role!=='user_input'),{live:true,settled:false});
   if(!ok){
     const list=_toolWorklogListEl(group);
     if(list) list.innerHTML='';
@@ -14301,7 +14376,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const rows=_settledSceneRowsWithUserInputs(_anchorSceneRowsForRendering(scene,{settled:true}),String(message._anchor_stream_id||scene.stream_id||scene.identity?.stream_id||''),blocks);
   if(!rows.length) return false;
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   // The assistant segment owns the final answer; pass it so intermediate prose
@@ -14316,7 +14391,15 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   blocks.querySelectorAll('.transparent-earlier-steps[data-anchor-earlier-steps="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    const text=String(node.getAttribute('data-raw-text')||'');
+    const message=S.messages[idx];
+    const wholeText=Array.isArray(message?.content)
+      ? message.content.filter(part=>part&&part.type==='text').map(part=>part.text||part.content||'').join('\n')
+      : text;
+    if(Number.isFinite(idx)&&idx<rawIdx&&rows.some(row=>row.role==='prose'&&(
+      _anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,text)||
+      _anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,wholeText)
+    ))){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -14590,7 +14673,8 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const disclosureKey=group.getAttribute('data-activity-disclosure-key')||'';
   const savedDisclosure=_readActivityDisclosureState(disclosureKey);
   const rows=_deferredWorklogRowsFromGroup(group);
-  if(!rows||!rows.length) return false;
+  if(!rows) return false;
+  if(!rows.length) return !!(group.hidden&&ownerHasVisibleSegment);
   const match=/^anchor-scene:(\d+)$/.exec(group.getAttribute('data-tool-worklog-key')||disclosureKey);
   const message=match&&S.messages&&S.messages[Number(match[1])];
   const errored=!!(message&&message._anchor_activity_scene&&
@@ -14645,11 +14729,19 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
-  if(!rows.length) return false;
+  const sceneRows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const finalAnswer=String(scene.final_answer||_assistantAnchorSceneFinalAnswerText(message)||msgContent(message)||'');
+  const lastTool=_anchorSceneLastNonTerminalWorkRowIndex(sceneRows);
+  const allRows=sceneRows.filter((row,index)=>row.role!=='prose'||(
+    !_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,finalAnswer)&&
+    !(index>lastTool&&_anchorSceneLiveTokenFinalPrefix(row,row.text,finalAnswer))
+  ));
+  const rows=allRows.filter(row=>row.role!=='prose'&&row.role!=='user_input');
+  if(!allRows.length) return false;
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    const text=String(node.getAttribute('data-raw-text')||'');
+    if(Number.isFinite(idx)&&idx<rawIdx&&allRows.some(row=>row.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,text))){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -14702,6 +14794,10 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   });
   if(!group) return false;
   group.setAttribute('data-anchor-settled-scene-owner','1');
+  _renderCompactConversationRows(group,_settledSceneRowsWithUserInputs(allRows,streamId,blocks),{settled:true});
+  // Successful compression can leave prose but no supporting details.
+  group.hidden=!rows.length;
+  if(!rows.length) return true;
   // #5839: for a COLLAPSED settled worklog, defer building the row DOM until the
   // user first expands it. A reasoning-heavy turn can carry 80+ activity rows;
   // eagerly materializing them for every historical turn balloons the DOM and a
@@ -14893,6 +14989,9 @@ function normalizeLiveActivityGroupPlacement(turn){
     return 0;
   });
   for(const group of groups){
+    // Anchor scenes own their group and prose together. Legacy parser anchors
+    // must not relocate or reason-mirror that retained projection on restore.
+    if(group.getAttribute('data-anchor-scene-owner')==='1') continue;
     const burstId=group.getAttribute('data-activity-burst-id')||'';
     const segmentSeq=group.getAttribute('data-live-segment-seq')||'';
     const anchor=segmentSeq
@@ -17019,7 +17118,7 @@ function _renderUserInputReceipts(){
   if(S.activeStreamId&&$('liveAssistantTurn')&&Array.from(S._userInputs.values()).some(r=>r.stream_id===S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId,sid);
   }
-  const liveInputs=new Map(Array.from(inner.querySelectorAll('#liveAssistantTurn .user-input-receipt[data-anchor-scene-row="1"]')).map(n=>[n.dataset.userInputId,n]));
+  const liveInputs=new Map(Array.from(inner.querySelectorAll('#liveAssistantTurn .user-input-receipt[data-anchor-scene-row="1"],.anchor-conversation .user-input-receipt[data-anchor-scene-row="1"],.user-input-receipt[data-anchor-settled-scene-row="1"]')).map(n=>[n.dataset.userInputId,n]));
   const existing=new Map();
   for(const node of inner.querySelectorAll('.user-input-receipt')){
     const live=liveInputs.get(node.dataset.userInputId);
@@ -17051,15 +17150,20 @@ function _renderUserInputReceipts(){
     }
     if(!target) continue;
     const row=_userInputReceiptNode(receipt,existing.get(receipt.input_id));
-    const previous=lastByTarget.get(target);
-    const finalSegment=target.id!=='liveAssistantTurn'
-      ? Array.from(target.querySelectorAll('.assistant-segment')).filter(n=>!n.classList.contains('assistant-segment-worklog-source')&&n.style.display!=='none').pop()
-      : null;
+    const segments=target.id!=='liveAssistantTurn'
+      ? Array.from(target.querySelectorAll('.assistant-segment')).filter(n=>!n.classList.contains('assistant-segment-worklog-source')&&n.style.display!=='none')
+      : [];
+    const finalSegment=segments.find(node=>{
+      const message=S.messages[Number(node.dataset.msgIdx)];
+      return message&&Number(message._ts||message.timestamp)>=Number(receipt.timestamp);
+    })||segments[segments.length-1];
+    const placement=finalSegment||target;
+    const previous=lastByTarget.get(placement);
     if(previous) previous.after(row);
     else if(finalSegment) finalSegment.before(row);
     else if(target.id==='liveAssistantTurn') target.before(row);
     else target.after(row);
-    lastByTarget.set(target,row);
+    lastByTarget.set(placement,row);
     existing.delete(receipt.input_id);
   }
   for(const row of existing.values()) row.remove();
@@ -18301,7 +18405,7 @@ function renderMessages(options){
             collapsed:true,
             anchor:anchorRow,
             beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
-            syncAnchorReason:anchorIsWorklogSource,
+            syncAnchorReason:false,
             activityKey,
             burstId:burstId||'',
             segmentSeq:segmentSeq||'',
@@ -18316,7 +18420,7 @@ function renderMessages(options){
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
           live:false,
-          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
+          includeAnchorReason:false,
           thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
           thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
           seenReasons:state.seenReasons,
@@ -19760,7 +19864,7 @@ function clearLiveToolCards(){
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   if(!preserveDom){
     const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-    if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row),[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+    if(inner) inner.querySelectorAll('.anchor-conversation,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row),[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   }
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).

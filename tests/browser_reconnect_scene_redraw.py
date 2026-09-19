@@ -156,8 +156,9 @@ def main():
                                         if(!group.isConnected||group.classList.contains('open')!==expectedOpen||group.getAttribute('data-live-tool-call-group')!=='1')
                                           throw new Error('interim update changed live disclosure ownership');
                                         const scene=_projectLiveAnchorActivitySceneForStream(S.activeStreamId,chatActivityMode());
-                                        const expected=_anchorSceneRowsForRendering(scene,{settled:false}).filter(r=>r.role!=='thinking'||window._showThinking!==false).map(r=>r.row_id);
-                                        const actual=Array.from(group.querySelectorAll('[data-anchor-scene-row]')).map(n=>n.getAttribute('data-anchor-row-id'));
+                                        const projected=_anchorSceneRowsForRendering(scene,{settled:false}).filter(r=>r.role!=='thinking'||window._showThinking!==false);
+                                        const expected=projected.filter(r=>r.role!=='prose').concat(projected.filter(r=>r.role==='prose')).map(r=>r.row_id);
+                                        const actual=Array.from(document.querySelectorAll('#liveAssistantTurn [data-anchor-scene-row]')).map(n=>n.getAttribute('data-anchor-row-id'));
                                         if(JSON.stringify(actual)!==JSON.stringify(expected))throw new Error('scene rows lost, duplicated or reordered');
                                       };
                                       // Both interim branches, with repeated reasoning/prose boundaries.

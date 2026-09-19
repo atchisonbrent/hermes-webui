@@ -483,7 +483,7 @@ for(const name of [
   'isLiveAnchorActivitySceneOwner','_projectLiveAnchorActivitySceneForStream',
   '_restoreLiveAnchorScrollSnapshotAfterRebuild',
   '_renderLiveAnchorActivitySceneTransparent','renderLiveAnchorActivityScene',
-  '_liveSceneRowsWithUserInputs',
+  '_liveSceneRowsWithUserInputs','_renderCompactConversationRows',
   '_renderLiveAnchorActivitySceneForStream','appendThinking','updateThinking',
 ]) eval(extractFunc(uiSrc,name));
 
