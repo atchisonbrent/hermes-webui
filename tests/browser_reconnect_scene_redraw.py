@@ -157,7 +157,7 @@ def main():
                                           throw new Error('interim update changed live disclosure ownership');
                                         const scene=_projectLiveAnchorActivitySceneForStream(S.activeStreamId,chatActivityMode());
                                         const projected=_anchorSceneRowsForRendering(scene,{settled:false}).filter(r=>r.role!=='thinking'||window._showThinking!==false);
-                                        const expected=projected.filter(r=>r.role!=='prose').concat(projected.filter(r=>r.role==='prose')).map(r=>r.row_id);
+                                        const expected=projected.map(r=>r.row_id);
                                         const actual=Array.from(document.querySelectorAll('#liveAssistantTurn [data-anchor-scene-row]')).map(n=>n.getAttribute('data-anchor-row-id'));
                                         if(JSON.stringify(actual)!==JSON.stringify(expected))throw new Error('scene rows lost, duplicated or reordered');
                                       };

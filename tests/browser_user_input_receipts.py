@@ -126,6 +126,7 @@ def main():
                                     await new Promise(r=>setTimeout(r,150));
                                   }
                                   renderMessages();_renderUserInputReceipts();
+                                  for(const g of document.querySelectorAll('.tool-worklog-group')){if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();g.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);}
                                   const pane=document.getElementById('messages');
                                   pane.scrollTop=pane.scrollHeight;
                                   await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
@@ -162,6 +163,7 @@ def main():
                                   delete session._user_inputs;
                                   source.emit('done',{session});
                                   while(S.busy&&performance.now()<end)await new Promise(r=>setTimeout(r,10));
+                                  for(const g of document.querySelectorAll('.tool-worklog-group')){if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();}
                                   return {busy:S.busy,rows:document.querySelectorAll('.user-input-receipt').length};
                                 }""",data)
                                 assert settled==dict(busy=False,rows=4),settled
@@ -175,7 +177,7 @@ def main():
                                 while not page.evaluate("typeof S!=='undefined'&&S._bootReady===true"):
                                     assert time.monotonic()<deadline
                                     page.wait_for_timeout(50)
-                                page.evaluate("async()=>{await loadSession('fixture');renderMessages();}")
+                                page.evaluate("async()=>{await loadSession('fixture');renderMessages();for(const g of document.querySelectorAll('.tool-worklog-group')){if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();}}")
                                 assert page.locator('.user-input-receipt').count()==4
                                 cached=page.evaluate("""()=>{
                                   renderMessages();
@@ -185,6 +187,7 @@ def main():
                                   let hits=0;const hydrate=_rehydrateTransparentStreamDom;
                                   _rehydrateTransparentStreamDom=(...args)=>{hits++;return hydrate(...args);};
                                   renderMessages();_rehydrateTransparentStreamDom=hydrate;
+                                  for(const g of document.querySelectorAll('.tool-worklog-group')){if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();}
                                   return {hits,rows:document.querySelectorAll('.user-input-receipt').length};
                                 }""")
                                 assert cached==dict(hits=1,rows=5),cached

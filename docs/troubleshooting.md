@@ -130,23 +130,26 @@ its display projection places escaped receipt rows by recorded timestamp:
 inline with activity in Transparent Stream, and among assistant updates in compact
 mode. Later work therefore appears below the answer/steer instead of pushing
 a trailing receipt along the bottom. These rows are not written into the Anchor
-registry or model messages. For Anchor-scene turns, compact mode keeps assistant
-updates and receipts outside Processed; receipts interleave with updates while
-tool and thinking details stay grouped in the disclosure.
-Collapsing it, finishing a run, and expanding it again must not hide or duplicate
-assistant output. Transparent Stream places receipts inline. Without an activity
-scene (including Final answer only), receipts precede the live output rather than
-trailing it. After settlement, recorded timestamps place receipts before the next
-known assistant update, or before the final answer when no later update exists.
-In compact mode, settled Processed disclosures sit together in their existing order
-immediately before the turn's last visible answer, after earlier assistant updates
-and receipts. Multiple activity groups in one turn share that conclusion placement.
-Reload and cached restoration preserve it; expanding a group retains the same
-supporting-detail nodes. Live compact updates retain unchanged, identified prose DOM
-when the turn exceeds the incremental Markdown parser cache. Changed text is
-re-rendered; deleted rows are removed. Anonymous rows without stable IDs are rebuilt.
-Older conversations without scenes also keep assistant prose visible. Rows without event timestamps
-keep their original scene order; precise interleaving requires recorded timestamps.
+registry or model messages. Compact mode uses a nested hierarchy:
+**Processed → AI updates → update text, thinking and tools**. Each update has a
+single-line summary and an independent disclosure; its thinking and tools collapse
+with it. Intermediate updates remain available after completion, reload and cache
+restoration. The final answer stays outside Processed. This supersedes the earlier
+presentation that detached updates from the worklog.
+
+Scene rows retain their chronological order inside updates. Thinking preceding an
+update is included with that update; activity without prose receives an AI-update
+entry too. Legacy history groups prose and activity by their assistant anchor.
+Consecutive tools retain their existing expandable tool-group summary inside the
+owning update, with independent disclosure keys. Recovered persisted updates with
+no timestamp are appended after the recorded scene rows rather than assigned an
+invented time.
+Unchanged identified rows retain their DOM during live redraws, including long
+turns beyond the incremental Markdown parser cache. Changed text is re-rendered;
+deleted rows are removed. Anonymous rows are rebuilt rather than conflated.
+Transparent Stream and Final answer only retain their separate presentation.
+Rows without event timestamps keep their original scene order; precise receipt
+interleaving requires recorded timestamps.
 A timestamp-free scene row can use the matching rendered message time, but text
 changed beyond whitespace (for example stripped display markers) may not match.
 Receipt times are normalized to seconds; a receipt with no usable timestamp is
