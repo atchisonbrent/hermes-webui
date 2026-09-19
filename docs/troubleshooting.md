@@ -138,6 +138,13 @@ assistant output. Transparent Stream places receipts inline. Without an activity
 scene (including Final answer only), receipts precede the live output rather than
 trailing it. After settlement, recorded timestamps place receipts before the next
 known assistant update, or before the final answer when no later update exists.
+In compact mode, settled Processed disclosures sit together in their existing order
+immediately before the turn's last visible answer, after earlier assistant updates
+and receipts. Multiple activity groups in one turn share that conclusion placement.
+Reload and cached restoration preserve it; expanding a group retains the same
+supporting-detail nodes. Live compact updates retain unchanged, identified prose DOM
+when the turn exceeds the incremental Markdown parser cache. Changed text is
+re-rendered; deleted rows are removed. Anonymous rows without stable IDs are rebuilt.
 Older conversations without scenes also keep assistant prose visible. Rows without event timestamps
 keep their original scene order; precise interleaving requires recorded timestamps.
 A timestamp-free scene row can use the matching rendered message time, but text
