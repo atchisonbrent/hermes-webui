@@ -469,11 +469,12 @@ global._firstValidTimestampSeconds=()=>null;
 // This fake DOM does not parse innerHTML. Supply only the disclosure shell;
 // exercise the production compact grouping and row renderer below.
 document.documentElement={lang:'en'};
+global._syncCompactUpdateSummary=()=>{};
 global._compactUpdateShell=(key,previous)=>{
   if(previous)return previous;
   const shell=new FakeElement('details');shell.className='compact-ai-update';
   shell.dataset.compactUpdateKey=key;
-  const preview=new FakeElement('span');preview.className='compact-ai-update-preview';shell.appendChild(preview);
+  const prose=new FakeElement('div');prose.className='compact-ai-update-prose';shell.appendChild(prose);
   const body=new FakeElement('div');body.className='compact-ai-update-body';shell.appendChild(body);
   return shell;
 };

@@ -5,7 +5,6 @@
 
 const LOCALES = {
   en: {
-    worklog_ai_update: 'AI update',
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',

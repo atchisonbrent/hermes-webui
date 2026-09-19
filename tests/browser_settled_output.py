@@ -77,7 +77,7 @@ def main():
                                     live = page.evaluate("""()=>{
                                       const group=document.querySelector('#liveAssistantTurn .tool-worklog-group');
                                       if(!group.classList.contains('open'))group.querySelector('.tool-worklog-summary').click();
-                                      group.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);
+                                      group.querySelectorAll('.compact-ai-update-activity').forEach(n=>n.open=true);
                                       return {visible:$('msgInner').innerText.includes('The requested fix is deployed.'),
                                         rows:document.querySelectorAll('.user-input-receipt').length};
                                     }""")
@@ -182,7 +182,7 @@ def main():
                                     page.evaluate("""stage=>{
                                       for(const group of document.querySelectorAll('.tool-worklog-group')){
                                         if(!group.classList.contains('open'))group.querySelector('.tool-worklog-summary').click();
-                                        group.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);
+                                        group.querySelectorAll('.compact-ai-update-activity').forEach(n=>n.open=true);
                                         group.querySelectorAll('.thinking-card:not(.open) .thinking-card-header').forEach(n=>n.click());
                                       }
                                     }""",stage)
@@ -193,7 +193,7 @@ def main():
                                           if(!$('msgInner').innerText.includes('Final test confirmation.'))throw new Error('Collapsed worklog hid final');
                                           for(const g of document.querySelectorAll('.tool-worklog-group')){
                                             if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();
-                                            g.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);
+                                            g.querySelectorAll('.compact-ai-update-activity').forEach(n=>n.open=true);
                                             g.querySelectorAll('.thinking-card:not(.open) .thinking-card-header').forEach(n=>n.click());
                                           }
                                         }""")
@@ -254,8 +254,8 @@ def main():
                                       const snapshot=JSON.stringify(final._anchor_activity_scene);
                                       S.messages=[S.messages[0],message,final];S.toolCalls=[];
                                       clearMessageRenderCache();renderMessages();
-                                      for(const g of document.querySelectorAll('.tool-worklog-group')){if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();g.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);}
-                                      return {copies:[...$('msgInner').querySelectorAll('.compact-ai-update-body')].filter(n=>n.textContent.includes('The requested fix is deployed.')).length,
+                                      for(const g of document.querySelectorAll('.tool-worklog-group')){if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();g.querySelectorAll('.compact-ai-update-activity').forEach(n=>n.open=true);}
+                                      return {copies:[...$('msgInner').querySelectorAll('.compact-ai-update-prose')].filter(n=>n.textContent.includes('The requested fix is deployed.')).length,
                                         sceneOwner:!!$('msgInner').querySelector('[data-anchor-settled-scene-owner="1"]'),
                                         conversation:!!$('msgInner').querySelector('.compact-ai-update'),
                                         sourceUnchanged:JSON.stringify(final._anchor_activity_scene)===snapshot};

@@ -69,7 +69,7 @@ def main():
        print(engine,width,'live',page.evaluate(CHECK),flush=True)
        page.evaluate("""()=>{
         const nodes=[...$('liveAssistantTurn').querySelectorAll('[data-anchor-row-role="prose"]')];
-        const update=document.querySelector('.compact-ai-update');update.open=true;
+        const update=document.querySelector('.compact-ai-update-activity');update.open=true;
         _renderLiveAnchorActivitySceneForStream(S.activeStreamId,S.session.session_id);
         if(!update.isConnected||!update.open||nodes.some(n=>!n.isConnected))throw new Error('Live redraw lost identity/open state');
        }""")
