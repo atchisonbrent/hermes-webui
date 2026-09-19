@@ -115,7 +115,6 @@ def _live_render_ownership_harness(*, move_to_bottom: bool) -> str:
     functions = [
         "renderLiveAnchorActivityScene",
         "_liveSceneRowsWithUserInputs",
-        "_renderCompactConversationRows",
         "_anchorScenePlaceChildren",
         "_freshProgrammaticScrollActive",
         "_recordNonMessageScrollIntent",

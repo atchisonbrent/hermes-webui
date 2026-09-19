@@ -11421,15 +11421,14 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
   if(m._live) return true;
-  // Settled assistant prose remains conversation, even when later tools ran.
-  if(hasVisibleText) return false;
+  // Compact mode keeps every intermediate update in its turn's worklog.
+  if(hasVisibleText) return isCompactWorklogMode()&&!opts?.isTurnFinalAssistant;
   if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return true;
   const hasToolMetadata=!!(
     (toolCallAssistantIdxs&&toolCallAssistantIdxs.has(rawIdx))||
     (Array.isArray(m.tool_calls)&&m.tool_calls.length)||
     (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
   );
-  if(hasVisibleText) return false;
   if(hasToolMetadata) return true;
   return false;
 }
@@ -12775,7 +12774,14 @@ function _deferredWorklogRowsFromGroup(group){
   const msg=S.messages&&S.messages[Number(m[1])];
   const scene=msg&&msg._anchor_activity_scene;
   if(!scene) return null;
-  return _anchorSceneRowsForRendering(scene,{settled:true}).filter(row=>row.role!=='prose'&&row.role!=='user_input');
+  const finalAnswer=String(scene.final_answer||_assistantAnchorSceneFinalAnswerText(msg)||msgContent(msg)||'');
+  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const lastTool=_anchorSceneLastNonTerminalWorkRowIndex(rows);
+  const intermediate=rows.filter((row,index)=>row.role!=='prose'||(
+    !_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,finalAnswer)&&
+    !(index>lastTool&&_anchorSceneLiveTokenFinalPrefix(row,row.text,finalAnswer))
+  ));
+  return _settledSceneRowsWithUserInputs(_compactSceneRowsWithPersistedUpdates(intermediate,group.parentElement,Number(m[1])),String(msg._anchor_stream_id||scene.stream_id||scene.identity?.stream_id||''),group.parentElement);
 }
 function _rehydrateDeferredWorklogsFromCache(root){
   // After restoring a transcript from _sessionHtmlCache, deferred settled
@@ -13059,6 +13065,7 @@ function _anchorSceneMergeToolRows(prev, row){
   });
 }
 function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
+  if(isCompactWorklogMode()) return _appendCompactUpdateStep(group,anchor,cards,thinkingText,opts);
   const list=_toolWorklogListEl(group);
   if(!group||!list) return;
   let wroteProse=false;
@@ -13253,7 +13260,9 @@ function _anchorSceneNodeForRow(row, opts){
   if(!row) return null;
   let node=null;
   if(row.role==='user_input'){
-    node=_userInputReceiptNode(row.receipt);
+    const id=String(row.receipt?.input_id||'');
+    const previous=id?$('msgInner')?.querySelector(`[data-user-input-id="${CSS.escape(id)}"]`):null;
+    node=_userInputReceiptNode(row.receipt,previous);
   }else if(row.role==='prose'){
     const text=String(row.text||'').trim();
     if(!text) return null;
@@ -13495,8 +13504,26 @@ function _anchorScenePlaceChildren(parent, nodes){
     next=node;
   }
 }
-// Assistant prose is conversation, not supporting activity. Keep its nodes
-// outside the disclosure so collapsing tools never conceals delivered output.
+// Preserve persisted updates when an older activity scene is incomplete.
+function _compactSceneRowsWithPersistedUpdates(rows, blocks, finalIdx){
+  const result=rows.slice();
+  // Older/cropped scenes need not contain every persisted update. Recover only
+  // rendered messages in this turn, never infer or mutate transcript history.
+  for(const node of blocks.querySelectorAll(':scope > .assistant-segment[data-msg-idx]')){
+    const idx=Number(node.dataset.msgIdx);
+    if(!Number.isFinite(idx)||idx>=finalIdx) continue;
+    const text=String(node.getAttribute('data-raw-text')||'').trim();
+    if(!text||_isAssistantEmptyPlaceholderContent(S.messages[idx],text)) continue;
+    if(result.some(r=>r.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(r._proseMessageText||r.text,text))) continue;
+    const message=S.messages[idx];
+    const timestamp=message?._ts||message?.timestamp;
+    const row={role:'prose',row_id:`persisted-update:${idx}`,text,timestamp,source_event_type:'settled_message',group:{assistant_msg_idx:idx}};
+    const time=_anchorSceneRowTimestampSeconds(row);
+    const next=time?result.findIndex(r=>_anchorSceneRowTimestampSeconds(r)>time):-1;
+    if(next<0) result.push(row);else result.splice(next,0,row);
+  }
+  return result;
+}
 function _settledSceneRowsWithUserInputs(rows, streamId, blocks){
   const messageTimes=new Map();
   for(const node of blocks.querySelectorAll('.assistant-segment[data-msg-idx]')){
@@ -13518,40 +13545,136 @@ function _settledSceneRowsWithUserInputs(rows, streamId, blocks){
   });
   return _liveSceneRowsWithUserInputs(timedRows,streamId);
 }
-function _renderCompactConversationRows(group, rows, opts){
-  let conversation=group.nextElementSibling;
-  const hasConversation=conversation?.classList.contains('anchor-conversation');
-  if(!hasConversation&&!rows.some(row=>row.role==='prose'||row.role==='user_input')) return;
-  if(!hasConversation){
-    conversation=document.createElement('div');
-    conversation.className='anchor-conversation';
-    group.after(conversation);
+// Compact updates own their prose, thinking and tools. Native details keep
+// keyboard/touch disclosure behavior and survive the HTML cache round trip.
+function _compactUpdateShell(key, previous){
+  if(previous) return previous;
+  const update=document.createElement('details');
+  update.className='compact-ai-update';
+  update.dataset.compactUpdateKey=key;
+  update.innerHTML='<summary class="compact-ai-update-summary"><span class="compact-ai-update-label"></span><span class="compact-ai-update-preview"></span></summary><div class="compact-ai-update-body"></div>';
+  update.querySelector('.compact-ai-update-label').textContent=t('worklog_ai_update');
+  update.open=_readActivityDisclosureState('compact-update:'+key)==='open';
+  // An inline handler survives the existing innerHTML transcript cache, and
+  // saves only explicit activation (not asynchronous initial toggle events).
+  update.querySelector('summary').setAttribute('onclick',"_writeActivityDisclosureState('compact-update:'+this.parentElement.dataset.compactUpdateKey,!this.parentElement.open)");
+  return update;
+}
+function _appendCompactUpdateStep(group, anchor, cards, thinkingText, opts){
+  const list=_toolWorklogListEl(group);
+  if(!list) return;
+  const key=_worklogReasonAnchorKey(anchor);
+  let update=Array.from(list.querySelectorAll(':scope > .compact-ai-update')).find(n=>n.dataset.compactUpdateKey===key);
+  update=_compactUpdateShell(key,update);
+  if(anchor?.dataset.msgIdx!==undefined) update.dataset.msgIdx=anchor.dataset.msgIdx;
+  const body=update.querySelector('.compact-ai-update-body');
+  if(opts?.includeAnchorReason!==false&&!body.querySelector('.msg-body')){
+    const html=_worklogReasonHtmlFromAnchor(anchor);
+    if(html){
+      const prose=document.createElement('div');
+      prose.className='assistant-segment';
+      prose.innerHTML=`<div class="msg-body">${html}</div>`;
+      body.appendChild(prose);
+      update.querySelector('.compact-ai-update-preview').textContent=_transparentEventPreview(prose.textContent);
+    }
   }
-  const existing=new Map(Array.from(conversation.querySelectorAll('[data-anchor-row-id]'))
-    .map(node=>[node.getAttribute('data-anchor-row-id'),node]));
-  const nodes=[];
+  const thinkingKey=opts?.thinkingKey||`reason:${String(thinkingText||'').trim()}`;
+  if(thinkingText&&!opts?.seenReasons?.has(thinkingKey)){
+    const thought=_thinkingActivityNode(thinkingText,false,opts?.thinkingDisclosureKey||thinkingKey);
+    if(thought){
+      body.appendChild(thought);
+      opts?.seenReasons?.add(thinkingKey);
+    }
+  }
+  const nodes=Array.from(body.children).flatMap(node=>node.matches('.wl-step-tools')?Array.from(node.querySelectorAll('.tool-card-row')):[node]);
+  for(const tc of _filterNewWorklogTools(cards,opts?.seenTools)) nodes.push(buildToolCard(tc));
+  _placeCompactUpdateChildren(body,nodes,opts);
+  if(body.children.length&&!update.parentElement) list.appendChild(update);
+}
+function _placeCompactUpdateChildren(body, nodes, opts){
+  const children=[];
+  const steps=[];
+  let tools=null,toolNodes=[];
+  const flush=()=>{
+    if(!tools) return;
+    const mounted=Array.from(tools.querySelectorAll('.tool-card-row'));
+    const unchanged=mounted.length===toolNodes.length&&mounted.every((n,i)=>n===toolNodes[i]);
+    if(!unchanged){
+      const grouped=tools.querySelector(':scope > .tool-group .tg-rows,:scope > .tool-worklog-tool-group .tg-rows');
+      _anchorScenePlaceChildren(grouped&&toolNodes.length>1?grouped:tools,toolNodes);
+    }
+    tools._anchorSceneToolsStable=unchanged;
+    tools=null;toolNodes=[];
+  };
+  for(const node of nodes){
+    if(node.classList.contains('tool-card-row')){
+      if(!tools){
+        const previous=node.closest('.wl-step-tools');
+        tools=previous&&previous.parentElement===body&&!children.includes(previous)?previous:document.createElement('div');
+        tools.className='wl-step-tools tool-worklog-tools';
+        tools.setAttribute('data-worklog-tools','1');
+        children.push(tools);steps.push(tools);
+      }
+      toolNodes.push(node);
+    }else{flush();children.push(node);}
+  }
+  flush();
+  _anchorScenePlaceChildren(body,children);
+  for(const [index,step] of steps.entries()){
+    _syncToolRowsContainer(step,!!opts?.live);
+    const group=step.querySelector(':scope > .tool-group,:scope > .tool-worklog-tool-group');
+    if(group) group.setAttribute('data-tool-group-disclosure-key',`update:${body.parentElement.dataset.compactUpdateKey}:step:${index}`);
+  }
+}
+function _renderCompactUpdateRows(group, rows, opts){
+  const list=_toolWorklogListEl(group);
+  if(!list) return false;
+  const rowKey=row=>row.row_id||row.local_id
+    ? JSON.stringify([row.row_id||'',row.local_id||'',row.role||'',row.source_event_type||'']) : '';
+  const existing=new Map(Array.from(list.querySelectorAll('[data-compact-row-key]')).map(n=>[n.dataset.compactRowKey,n]));
+  const updates=new Map(Array.from(list.querySelectorAll(':scope > .compact-ai-update')).map(n=>[n.dataset.compactUpdateKey,n]));
+  const batches=[];
+  let batch=null;
   for(const row of rows){
-    if(row.role!=='prose'&&row.role!=='user_input') continue;
-    const key=String(row.row_id||row.local_id||'');
-    const previous=existing.get(key);
-    // The incremental parser cache is bounded across turns. Retain unchanged
-    // prose from this conversation's DOM too, so a long live turn cannot churn
-    // every row merely because its parser entries exceeded that cache.
-    const signature=row.role==='prose'
-      ? (key ? JSON.stringify([row,opts||{},document.documentElement.lang,
-        window._fadeTextEffect===true,
-        typeof isTransparentStream==='function'&&isTransparentStream(),
-        !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches]) : null)
-      : _anchorSceneRetainedRowSignature(row,opts);
-    const node=signature&&previous&&previous._anchorRowRenderSignature===signature
-      ? previous : _anchorSceneNodeForRow(row,opts);
-    if(!node) continue;
-    node._anchorRowRenderSignature=signature;
-    nodes.push(node);
+    // Thinking starts the next update after a completed prose/tool batch. A
+    // subsequent prose row supplies its summary rather than stranding thought.
+    if(!batch||(row.role==='prose'&&batch.some(r=>r.role==='prose'))||
+      (row.role==='thinking'&&batch.some(r=>r.role==='prose'||r.role==='tool'))){
+      batch=[];batches.push(batch);
+    }
+    batch.push(row);
   }
-  _anchorScenePlaceChildren(conversation,nodes);
+  const children=[];
+  for(const [index,batchRows] of batches.entries()){
+    const first=batchRows[0];
+    const key=rowKey(first)||`anonymous:${index}`;
+    const update=_compactUpdateShell(key,updates.get(key));
+    const body=update.querySelector('.compact-ai-update-body');
+    const nodes=[];
+    for(const row of batchRows){
+      const id=rowKey(row);
+      const previous=id?existing.get(id):null;
+      const signature=id?JSON.stringify([row,opts||{},document.documentElement.lang,window._showThinking,window._fadeTextEffect===true,!!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches]):null;
+      const node=signature&&previous?._anchorRowRenderSignature===signature?previous:_anchorSceneNodeForRow(row,opts);
+      if(!node) continue;
+      node._anchorRowRenderSignature=signature;
+      if(id) node.dataset.compactRowKey=id;
+      nodes.push(node);
+    }
+    if(!nodes.length) continue;
+    const prose=batchRows.find(r=>r.role==='prose');
+    const preview=update.querySelector('.compact-ai-update-preview');
+    const text=prose?_transparentEventPreview(prose.text):'';
+    if(preview.textContent!==text) preview.textContent=text;
+    _placeCompactUpdateChildren(body,nodes,opts);
+    children.push(update);
+  }
+  _anchorScenePlaceChildren(list,children);
+  if(children.length) _syncToolCallGroupSummary(group);
+  return !!children.length;
 }
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
+  if(isCompactWorklogMode()) return _renderCompactUpdateRows(group,rows,opts);
   const list=_toolWorklogListEl(group);
   if(!group||!list) return false;
   const existing=new Map();
@@ -13862,8 +13985,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     streamId:streamId||S.activeStreamId||'',
     turnStartedAt:S.session&&S.session.pending_started_at,
   });
-  _renderCompactConversationRows(group,rows,{live:true,settled:false});
-  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows.filter(row=>row.role!=='prose'&&row.role!=='user_input'),{live:true,settled:false});
+  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false});
   if(!ok){
     const list=_toolWorklogListEl(group);
     if(list) list.innerHTML='';
@@ -14744,7 +14866,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
     !_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,finalAnswer)&&
     !(index>lastTool&&_anchorSceneLiveTokenFinalPrefix(row,row.text,finalAnswer))
   ));
-  const rows=allRows.filter(row=>row.role!=='prose'&&row.role!=='user_input');
+  const rows=_settledSceneRowsWithUserInputs(_compactSceneRowsWithPersistedUpdates(allRows,blocks,rawIdx),String(message._anchor_stream_id||scene.stream_id||scene.identity?.stream_id||''),blocks);
   if(!allRows.length) return false;
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
@@ -14802,7 +14924,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   });
   if(!group) return false;
   group.setAttribute('data-anchor-settled-scene-owner','1');
-  _renderCompactConversationRows(group,_settledSceneRowsWithUserInputs(allRows,streamId,blocks),{settled:true});
+  // All intermediate updates and their activity remain inside Processed.
   // Successful compression can leave prose but no supporting details.
   group.hidden=!rows.length;
   if(!rows.length) return true;
@@ -17149,7 +17271,7 @@ function _renderUserInputReceipts(){
   if(S.activeStreamId&&$('liveAssistantTurn')&&Array.from(S._userInputs.values()).some(r=>r.stream_id===S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId,sid);
   }
-  const liveInputs=new Map(Array.from(inner.querySelectorAll('#liveAssistantTurn .user-input-receipt[data-anchor-scene-row="1"],.anchor-conversation .user-input-receipt[data-anchor-scene-row="1"],.user-input-receipt[data-anchor-settled-scene-row="1"]')).map(n=>[n.dataset.userInputId,n]));
+  const liveInputs=new Map(Array.from(inner.querySelectorAll('#liveAssistantTurn .user-input-receipt[data-anchor-scene-row="1"],.tool-worklog-group .user-input-receipt[data-anchor-scene-row="1"],.user-input-receipt[data-anchor-settled-scene-row="1"]')).map(n=>[n.dataset.userInputId,n]));
   const existing=new Map();
   for(const node of inner.querySelectorAll('.user-input-receipt')){
     const live=liveInputs.get(node.dataset.userInputId);
@@ -17182,7 +17304,7 @@ function _renderUserInputReceipts(){
     if(!target) continue;
     const row=_userInputReceiptNode(receipt,existing.get(receipt.input_id));
     const segments=target.id!=='liveAssistantTurn'
-      ? Array.from(target.querySelectorAll('.assistant-segment')).filter(n=>!n.classList.contains('assistant-segment-worklog-source')&&n.style.display!=='none')
+      ? Array.from(target.querySelectorAll('.assistant-segment,.compact-ai-update[data-msg-idx]')).filter(n=>!n.classList.contains('assistant-segment-worklog-source')&&n.style.display!=='none')
       : [];
     const finalSegment=segments.find(node=>{
       const message=S.messages[Number(node.dataset.msgIdx)];
@@ -18452,7 +18574,7 @@ function renderMessages(options){
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
           live:false,
-          includeAnchorReason:false,
+          includeAnchorReason:anchorRow.classList.contains('assistant-segment-worklog-source'),
           thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
           thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
           seenReasons:state.seenReasons,

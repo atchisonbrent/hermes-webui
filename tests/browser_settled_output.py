@@ -76,7 +76,8 @@ def main():
                                 if mode == 'compact_worklog':
                                     live = page.evaluate("""()=>{
                                       const group=document.querySelector('#liveAssistantTurn .tool-worklog-group');
-                                      if(group.classList.contains('open'))group.querySelector('.tool-worklog-summary').click();
+                                      if(!group.classList.contains('open'))group.querySelector('.tool-worklog-summary').click();
+                                      group.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);
                                       return {visible:$('msgInner').innerText.includes('The requested fix is deployed.'),
                                         rows:document.querySelectorAll('.user-input-receipt').length};
                                     }""")
@@ -84,7 +85,7 @@ def main():
                                     retained = page.evaluate("""()=>{
                                       const turn=$('liveAssistantTurn');
                                       const group=turn.querySelector('.tool-worklog-group');
-                                      const conversation=turn.querySelector('.anchor-conversation');
+                                      const conversation=group.querySelector('.tool-worklog-list');
                                       const nodes=[...conversation.children];
                                       // A later parser anchor exists when a cached live turn is restored.
                                       const anchor=document.createElement('div');
@@ -94,45 +95,45 @@ def main():
                                       _assistantTurnBlocks(turn).appendChild(anchor);
                                       normalizeLiveActivityGroupPlacement(turn);
                                       _renderLiveAnchorActivitySceneForStream(S.activeStreamId,S.session.session_id);
-                                      return {containers:turn.querySelectorAll('.anchor-conversation').length,
+                                      return {containers:turn.querySelectorAll('.tool-worklog-list').length,
                                         retained:nodes.every(n=>n.isConnected&&n.parentElement===conversation),
-                                        adjacent:group.nextElementSibling===conversation};
+                                        adjacent:group.contains(conversation)};
                                     }""")
                                     assert retained == dict(containers=1,retained=True,adjacent=True),retained
                                     page.evaluate("""()=>{
                                       const host=document.createElement('div');
-                                      const group=document.createElement('div');host.appendChild(group);
+                                      const group=document.createElement('div');group.innerHTML='<div class="tool-worklog-list"></div>';host.appendChild(group);
                                       const row={role:'prose',row_id:'retention-check',text:'Original **content**'};
-                                      _renderCompactConversationRows(group,[row],{settled:true});
+                                      _renderCompactUpdateRows(group,[row],{settled:true});
                                       const original=host.querySelector('[data-anchor-row-id]');
-                                      _renderCompactConversationRows(group,[{...row}],{settled:true});
+                                      _renderCompactUpdateRows(group,[{...row}],{settled:true});
                                       if(host.querySelector('[data-anchor-row-id]')!==original)throw new Error('Unchanged prose rebuilt');
-                                      _renderCompactConversationRows(group,[{...row,text:'Corrected **content**'}],{settled:true});
+                                      _renderCompactUpdateRows(group,[{...row,text:'Corrected **content**'}],{settled:true});
                                       const changed=host.querySelector('[data-anchor-row-id]');
                                       if(changed===original||!changed.textContent.includes('Corrected content'))throw new Error('Prose correction stale');
-                                      _renderCompactConversationRows(group,[],{settled:true});
+                                      _renderCompactUpdateRows(group,[],{settled:true});
                                       if(host.querySelector('[data-anchor-row-id]'))throw new Error('Removed prose retained');
                                       const anonymous={role:'prose',text:'Anonymous repeated update'};
-                                      _renderCompactConversationRows(group,[anonymous,{...anonymous}],{settled:true});
-                                      _renderCompactConversationRows(group,[anonymous,{...anonymous}],{settled:true});
-                                      if(host.querySelector('.anchor-conversation').children.length!==2)throw new Error('Anonymous prose collapsed');
+                                      _renderCompactUpdateRows(group,[anonymous,{...anonymous}],{settled:true});
+                                      _renderCompactUpdateRows(group,[anonymous,{...anonymous}],{settled:true});
+                                      if(host.querySelectorAll('.compact-ai-update').length!==2)throw new Error('Anonymous prose collapsed');
                                       const savedFade=window._fadeTextEffect;
                                       const liveRow={role:'prose',row_id:'fade-check',text:'Live fade check'};
                                       try{
                                         window._fadeTextEffect=false;
-                                        _renderCompactConversationRows(group,[liveRow],{settled:false});
+                                        _renderCompactUpdateRows(group,[liveRow],{settled:false});
                                         if(host.querySelector('.stream-fade-active'))throw new Error('Fade unexpectedly active');
                                         window._fadeTextEffect=true;
-                                        _renderCompactConversationRows(group,[liveRow],{settled:false});
+                                        _renderCompactUpdateRows(group,[liveRow],{settled:false});
                                         if(!host.querySelector('.stream-fade-active'))throw new Error('Fade toggle did not invalidate retained prose');
                                       }finally{window._fadeTextEffect=savedFade;}
                                     }""")
                                     cleanup=page.evaluate("""()=>{
-                                      const original=$('liveAssistantTurn').querySelector('.anchor-conversation');
+                                      const original=$('liveAssistantTurn').querySelector('.tool-worklog-group');
                                       clearLiveToolCards({preserveDom:true});
                                       const preserved=original.isConnected;
                                       clearLiveToolCards();
-                                      const remaining=$('liveAssistantTurn').querySelectorAll('.anchor-conversation').length;
+                                      const remaining=$('liveAssistantTurn').querySelectorAll('.tool-worklog-group').length;
                                       _renderLiveAnchorActivitySceneForStream(S.activeStreamId,S.session.session_id);
                                       return {preserved,remaining};
                                     }""")
@@ -154,7 +155,7 @@ def main():
                                       const row=document.querySelector('[data-user-input-id="late-receipt"]');
                                       const group=document.querySelector('[data-anchor-settled-scene-owner="1"]');
                                       if(!group)throw new Error('Settled disclosure missing before late receipt check');
-                                      if(!row||!(row.compareDocumentPosition(group)&Node.DOCUMENT_POSITION_FOLLOWING))throw new Error('Late receipt stranded after disclosure');
+                                      if(!row||(!group.contains(row)&&!(row.compareDocumentPosition(group)&Node.DOCUMENT_POSITION_FOLLOWING)))throw new Error('Late receipt stranded after disclosure');
                                       S._userInputs.delete('late-receipt');row.remove();
                                     }""")
                                 for stage in ['settled', 'expanded', 'rerender', 'reload', 'cache', 'older-scene']:
@@ -177,12 +178,30 @@ def main():
                                             assert time.monotonic()<deadline
                                             page.wait_for_timeout(50)
                                         page.evaluate("async mode=>{window._chatActivityDisplayMode=mode;await loadSession('fixture');renderMessages();}",mode)
-                                    # Assistant updates must survive collapsed supporting activity.
+                                    # Compact updates are hidden while Processed is closed, then fully recover on expansion.
                                     page.evaluate("""stage=>{
                                       for(const group of document.querySelectorAll('.tool-worklog-group')){
-                                        if(group.classList.contains('open')!==(stage==='expanded'))group.querySelector('.tool-worklog-summary').click();
+                                        if(!group.classList.contains('open'))group.querySelector('.tool-worklog-summary').click();
+                                        group.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);
+                                        group.querySelectorAll('.thinking-card:not(.open) .thinking-card-header').forEach(n=>n.click());
                                       }
                                     }""",stage)
+                                    if mode=='compact_worklog':
+                                        page.evaluate("""()=>{
+                                          for(const g of document.querySelectorAll('.tool-worklog-group'))if(g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();
+                                          if($('msgInner').innerText.includes('The requested fix is deployed.'))throw new Error('Collapsed worklog leaked an update');
+                                          if(!$('msgInner').innerText.includes('Final test confirmation.'))throw new Error('Collapsed worklog hid final');
+                                          for(const g of document.querySelectorAll('.tool-worklog-group')){
+                                            if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();
+                                            g.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);
+                                            g.querySelectorAll('.thinking-card:not(.open) .thinking-card-header').forEach(n=>n.click());
+                                          }
+                                        }""")
+                                        page.evaluate("""async()=>{
+                                          await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+                                          document.querySelectorAll('.thinking-card:not(.open) .thinking-card-header').forEach(n=>n.click());
+                                        }""")
+                                        page.wait_for_function("$('msgInner').innerText.includes('Internal reasoning fixture.')")
                                     result = page.evaluate("""()=>{
                                       const inner=$('msgInner');
                                       const receipt=inner.querySelector('.user-input-receipt');
@@ -191,25 +210,25 @@ def main():
                                       const output=prose.find(n=>n.textContent.includes('The requested fix is deployed.'));
                                       return {busy:S.busy,outputVisible:!!output,receiptBeforeOutput:!!output&&!!receipt&&!!(receipt.compareDocumentPosition(output)&Node.DOCUMENT_POSITION_FOLLOWING),
                                         answerAfterUpdate:!!output&&!!(output.compareDocumentPosition(inner.querySelector('[data-user-input-id="answer"]'))&Node.DOCUMENT_POSITION_FOLLOWING),
-                                        outputCopies:inner.innerText.split('The requested fix is deployed.').length-1,
+                                        outputCopies:prose.filter(n=>n.textContent.includes('The requested fix is deployed.')&&!n.parentElement.closest('.msg-body,[data-anchor-row-role="prose"]')).length,
                                         finalCopies:inner.innerText.split('Final test confirmation.').length-1,
                                         earlierVisible:inner.innerText.includes('Earlier progress'),
                                         thinkingExposed:inner.innerText.includes('Internal reasoning fixture.'),
-                                        receiptsVisible:[...inner.querySelectorAll('.user-input-receipt')].every(n=>visible(n)&&!n.closest('.tool-worklog-group')),
+                                        receiptsVisible:[...inner.querySelectorAll('.user-input-receipt')].every(n=>visible(n)),
                                         receipts:inner.querySelectorAll('.user-input-receipt').length};
                                     }""")
                                     if mode=='compact_worklog':
                                         placement=page.evaluate("""()=>{
                                           const group=document.querySelector('[data-anchor-settled-scene-owner="1"]');
                                           const final=[...document.querySelectorAll('.assistant-segment')].find(n=>!n.hidden&&n.innerText.includes('Final test confirmation.'));
-                                          const updates=document.querySelector('.anchor-conversation');
+                                          const updates=group?.querySelector('.compact-ai-update');
                                           return {atConclusion:!!group&&!!final&&group.nextElementSibling===final,
-                                            afterUpdates:!!updates&&!!(updates.compareDocumentPosition(group)&Node.DOCUMENT_POSITION_FOLLOWING)};
+                                            nestedUpdates:!!updates&&group.contains(updates)};
                                         }""")
-                                        assert placement==dict(atConclusion=True,afterUpdates=True),placement
+                                        assert placement==dict(atConclusion=True,nestedUpdates=True),placement
                                     print(engine, mode, width, stage, result, flush=True)
                                     assert result['outputVisible'], 'Produced answer vanished'
-                                    if mode=='compact_worklog' and stage!='expanded':assert not result['thinkingExposed'],result
+                                    if mode=='compact_worklog':assert result['thinkingExposed'],(result,page.locator('.thinking-card-body').all_inner_texts())
                                     assert result['receiptBeforeOutput'], 'Earlier steer moved after produced answer'
                                     assert result['answerAfterUpdate'], 'Later clarification moved before earlier output'
                                     assert result['outputCopies'] == 1 and result['receipts'] == 2, result
@@ -235,9 +254,10 @@ def main():
                                       const snapshot=JSON.stringify(final._anchor_activity_scene);
                                       S.messages=[S.messages[0],message,final];S.toolCalls=[];
                                       clearMessageRenderCache();renderMessages();
-                                      return {copies:$('msgInner').innerText.split('The requested fix is deployed.').length-1,
+                                      for(const g of document.querySelectorAll('.tool-worklog-group')){if(!g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();g.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);}
+                                      return {copies:[...$('msgInner').querySelectorAll('.compact-ai-update-body')].filter(n=>n.textContent.includes('The requested fix is deployed.')).length,
                                         sceneOwner:!!$('msgInner').querySelector('[data-anchor-settled-scene-owner="1"]'),
-                                        conversation:!!$('msgInner').querySelector('.anchor-conversation'),
+                                        conversation:!!$('msgInner').querySelector('.compact-ai-update'),
                                         sourceUnchanged:JSON.stringify(final._anchor_activity_scene)===snapshot};
                                     }""")
                                     assert cold==dict(copies=1,sceneOwner=True,conversation=True,sourceUnchanged=True),cold
@@ -252,10 +272,10 @@ def main():
                                       clearMessageRenderCache();renderMessages();
                                       const group=$('msgInner').querySelector('[data-anchor-settled-scene-owner="1"]');
                                       return {update:$('msgInner').innerText.includes('Compression update.'),
-                                        emptyDisclosureVisible:!!group&&!!group.getClientRects().length,
+                                        disclosureVisible:!!group&&!!group.getClientRects().length,
                                         settledInPlace:_collapseJustSettledWorklogInPlace(message._anchor_stream_id)};
                                     }""")
-                                    assert compression==dict(update=True,emptyDisclosureVisible=False,settledInPlace=True),compression
+                                    assert compression==dict(update=True,disclosureVisible=True,settledInPlace=True),compression
                                 context.close()
                     finally:
                         browser.close()

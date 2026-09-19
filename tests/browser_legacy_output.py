@@ -46,17 +46,24 @@ def main():
                             page.evaluate("async mode=>{window._chatActivityDisplayMode=mode;await loadSession('fixture');renderMessages();}",mode)
                             for stage in ['collapsed','expanded','rerender']:
                                 if stage=='rerender':page.evaluate('renderMessages()')
+                                if mode=='compact_worklog':
+                                    page.evaluate("""()=>{
+                                      for(const g of document.querySelectorAll('.tool-worklog-group'))if(g.classList.contains('open'))g.querySelector('.tool-worklog-summary').click();
+                                      if($('msgInner').innerText.includes('Delivered important result.'))throw new Error('Collapsed legacy update leaked');
+                                      if(!$('msgInner').innerText.includes('Verification complete.'))throw new Error('Legacy final hidden');
+                                    }""")
                                 result=page.evaluate("""stage=>{
                                   const inner=$('msgInner');
                                   for(const group of inner.querySelectorAll('.tool-worklog-group')){
-                                    if(group.classList.contains('open')!==(stage==='expanded'))group.querySelector('.tool-worklog-summary').click();
+                                    if(!group.classList.contains('open'))group.querySelector('.tool-worklog-summary').click();
+                                    group.querySelectorAll('.compact-ai-update').forEach(n=>n.open=true);
                                   }
                                   const text=inner.innerText;
                                   const a=text.indexOf('Delivered important result.');
                                   const b=text.indexOf('Verifying the remaining branch.');
                                   const c=text.indexOf('Verification complete.');
                                   return {visible:a>=0&&b>=0,ordered:a<b&&b<c,steerBeforeOutput:text.indexOf('Include steers too')<a,
-                                    copies:text.split('Delivered important result.').length-1,busy:S.busy};
+                                    copies:[...inner.querySelectorAll('.msg-body')].filter(n=>n.textContent.includes('Delivered important result.')&&!n.closest('.assistant-segment-worklog-source')).length,busy:S.busy};
                                 }""",stage)
                                 if mode=='compact_worklog':
                                     assert page.evaluate("""()=>{
@@ -72,6 +79,7 @@ def main():
                                   clearMessageRenderCache();renderMessages();
                                 }""")
                                 summary=page.locator('.tool-worklog-summary').last
+                                page.evaluate("$('messages').dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true}));")
                                 summary.scroll_into_view_if_needed()
                                 state = {}
                                 initially_open=page.locator('.tool-worklog-group').evaluate("g=>g.classList.contains('open')")

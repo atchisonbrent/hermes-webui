@@ -1410,6 +1410,7 @@ global._anchorSceneWorklogGroup=(blocks, opts)=>{{
 global._renderAnchorSceneRowsIntoWorklog=(group, rows)=>{{
   compactRenders++;
   group.setAttribute('data-rendered-count',String(rows.length));
+  group._prose=rows.filter(r=>r.role==='prose').map(r=>r.text);
   return true;
 }};
 global._syncToolCallGroupSummary=()=>{{}};
@@ -1417,7 +1418,6 @@ global._syncToolCallGroupSummary=()=>{{}};
     eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
     eval(extractFunc('_anchorSceneTransparentNodeForRow'));
     eval(extractFunc('_liveSceneRowsWithUserInputs'));
-    eval(extractFunc('_renderCompactConversationRows'));
     eval(extractFunc('_anchorScenePlaceChildren'));
     eval(extractFunc('renderLiveAnchorActivityScene'));
     eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
@@ -1497,7 +1497,7 @@ process.stdout.write(JSON.stringify({{
   compactRenders,
   compactSessionId:liveTurn.dataset.sessionId,
   compactRenderedCount:liveTurn.querySelector('.tool-worklog-group').getAttribute('data-rendered-count'),
-  compactProse:liveTurn.querySelector('.tool-worklog-group').nextElementSibling.children.map(n=>n.textContent),
+  compactProse:liveTurn.querySelector('.tool-worklog-group')._prose,
 }}));
 """
     result = _run_node_script(script)
@@ -1516,7 +1516,7 @@ process.stdout.write(JSON.stringify({{
     assert result["compactGroups"] == 1
     assert result["compactRenders"] == 1
     assert result["compactSessionId"] == "sid-1"
-    assert result["compactRenderedCount"] == "2"
+    assert result["compactRenderedCount"] == "4"
     assert result["compactProse"] == ["progress one", "progress two"]
 
 
@@ -1552,11 +1552,10 @@ def test_settled_anchor_scene_final_answer_does_not_fold_into_worklog_source():
     belongs = _function_body(UI_JS, "_assistantMessageBelongsInWorklog")
     render = _function_body(UI_JS, "renderMessages")
 
-    assert "if(hasVisibleText) return false;" in belongs
-    assert belongs.index("if(m._live) return true;") < belongs.index(
-        "if(hasVisibleText) return false;"
-    )
-    assert belongs.index("if(hasVisibleText) return false;") < belongs.index(
+    compact_rule = "if(hasVisibleText) return isCompactWorklogMode()&&!opts?.isTurnFinalAssistant;"
+    assert compact_rule in belongs
+    assert belongs.index("if(m._live) return true;") < belongs.index(compact_rule)
+    assert belongs.index(compact_rule) < belongs.index(
         "if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return true;"
     )
     assert "seg.classList.add('assistant-segment-worklog-source')" in render
