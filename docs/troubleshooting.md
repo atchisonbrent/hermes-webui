@@ -125,8 +125,17 @@ existing per-session turn journal. They have no turn ID, do not change model
 messages, and cannot cause turn recovery or replay the input. Session responses
 return them separately as `_user_inputs` when messages are requested, not on
 metadata-only polls. Receipt content uses the existing API credential redaction
-on both accepted responses and later loads. The browser shows escaped user rows
-beside the owning run, outside the compact worklog and before its final answer.
+on both accepted responses and later loads. While an Anchor-owned run is live,
+its display projection interleaves escaped receipt rows with activity by recorded
+timestamp; later work therefore appears below the answer/steer instead of pushing
+a trailing receipt along the bottom. These rows are not written into the Anchor
+registry or model messages. Compact receipts follow the worklog disclosure while
+live; Transparent Stream places them inline. Without an activity scene (including
+Final answer only), receipts precede the live output rather than trailing it.
+Settled receipts remain before the final answer. Rows without event timestamps
+keep their original scene order; precise interleaving requires recorded timestamps.
+Receipt times are normalized to seconds; a receipt with no usable timestamp is
+placed before activity rather than following the growing tail.
 Repeated rendering, including cached restores, dedupes by receipt ID rather than
 matching answer text. A journal read failure leaves the transcript available and
 shows a warning instead of silently implying there were no inputs.
