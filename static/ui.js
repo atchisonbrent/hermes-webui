@@ -13227,7 +13227,9 @@ function _anchorSceneNodeForRow(row, opts){
   const settled=!!(opts&&opts.settled);
   if(!row) return null;
   let node=null;
-  if(row.role==='prose'){
+  if(row.role==='user_input'){
+    node=_userInputReceiptNode(row.receipt);
+  }else if(row.role==='prose'){
     const text=String(row.text||'').trim();
     if(!text) return null;
     // Incremental live rendering: reuse a persistent smd node fed only the delta
@@ -13309,7 +13311,9 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     segmentSeq:row.segment_seq||row.segmentSeq||'',
     burstId:row.activity_burst_id||row.burst_id||row.burstId||'',
   };
-  if(row.role==='prose'){
+  if(row.role==='user_input'){
+    node=_userInputReceiptNode(row.receipt);
+  }else if(row.role==='prose'){
     // The settled assistant segment already owns the FINAL answer prose, so a
     // prose row whose text matches the final answer must be suppressed here to
     // avoid duplicating the answer. But INTERMEDIATE progress prose (the
@@ -13445,7 +13449,7 @@ function _anchorSceneRetainedRowSignature(row, opts){
     return JSON.stringify([row,opts||{},document.documentElement.lang,
       _worklogDetailsExpandedDefault()]);
   }
-  if(row.role!=='tool') return null;
+  if(row.role!=='tool'&&row.role!=='user_input') return null;
   return JSON.stringify([row,opts||{},document.documentElement.lang,
     typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
 }
@@ -13737,7 +13741,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:false});
+  const rows=_liveSceneRowsWithUserInputs(_anchorSceneRowsForRendering(scene,{settled:false}),streamId);
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -13796,7 +13800,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:false});
+  const rows=_liveSceneRowsWithUserInputs(_anchorSceneRowsForRendering(scene,{settled:false}),streamId);
   if(!rows.length) return false;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
@@ -13816,7 +13820,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const activeStreamId = String(streamId || S.activeStreamId || '');
   const activeSessionId = String(S.session && S.session.session_id || '');
   const preserveByKey = new Map();
-  blocks.querySelectorAll('.transparent-event-row[data-live-stream-owned="1"][data-anchor-row-id]').forEach(node=>{
+  blocks.querySelectorAll('.transparent-event-row[data-live-stream-owned="1"][data-anchor-row-id],.user-input-receipt[data-live-stream-owned="1"][data-anchor-row-id]').forEach(node=>{
     if(!node||!node.getAttribute) return;
     const rowStream = String(node.getAttribute('data-anchor-stream-id') || '');
     if(rowStream && rowStream !== activeStreamId) return;
@@ -16962,6 +16966,42 @@ function _rememberUserInputReceipt(sid,receipt){
   _renderUserInputReceipts();
 }
 
+// Display-only rows: never insert these into the registry or model messages.
+function _liveSceneRowsWithUserInputs(rows,streamId){
+  const inputs=new Map();
+  for(const receipt of S.session?._user_inputs||[]) inputs.set(receipt.input_id,receipt);
+  if(S._userInputsSessionId===S.session?.session_id){
+    for(const [id,receipt] of S._userInputs||[]) inputs.set(id,receipt);
+  }
+  const pending=Array.from(inputs.values()).filter(receipt=>receipt?.input_id&&
+    receipt.stream_id===streamId&&['steer','clarify'].includes(receipt.kind)&&
+    typeof receipt.content==='string').map(receipt=>({receipt,timestamp:_anchorSceneRowTimestampSeconds(receipt)||0}))
+    .sort((a,b)=>a.timestamp-b.timestamp);
+  if(!pending.length) return rows;
+  const result=[];
+  let index=0;
+  const appendInput=receipt=>result.push({row_id:`user-input:${receipt.input_id}`,
+    role:'user_input',source_event_type:'user_input',status:'completed',receipt});
+  for(const row of rows){
+    const timestamp=_anchorSceneRowTimestampSeconds(row);
+    // Missing receipt time belongs before activity, never at the growing tail.
+    while(index<pending.length&&(!pending[index].timestamp||timestamp&&pending[index].timestamp<=timestamp)) appendInput(pending[index++].receipt);
+    result.push(row);
+  }
+  while(index<pending.length) appendInput(pending[index++].receipt);
+  return result;
+}
+
+function _userInputReceiptNode(receipt,row){
+  // Reuse a fallback row when the live scene takes ownership after reattach.
+  if(!row) row=$('msgInner')?.querySelector(`.user-input-receipt[data-user-input-id="${CSS.escape(receipt.input_id)}"]`);
+  if(!row){row=document.createElement('div');row.className='msg-row user-input-receipt';row.dataset.role='user';row.dataset.userInputId=receipt.input_id;}
+  const label=t(receipt.kind==='steer'?'user_input_steer':'user_input_answer');
+  const html=`<div class="msg-body" style="white-space:pre-wrap">${esc(receipt.content)}</div><div class="msg-foot"><span class="msg-time">${esc(label)} · ${esc(_formatMessageFooterTimestamp(receipt.timestamp))}</span></div>`;
+  if(row.innerHTML!==html) row.innerHTML=html;
+  return row;
+}
+
 function _renderUserInputReceipts(){
   const inner=$('msgInner');
   const sid=S.session?.session_id;
@@ -16974,11 +17014,22 @@ function _renderUserInputReceipts(){
   for(const receipt of S.session._user_inputs||[]){
     if(receipt?.input_id) S._userInputs.set(receipt.input_id,receipt);
   }
-  const existing=new Map(Array.from(inner.querySelectorAll('.user-input-receipt')).map(n=>[n.dataset.userInputId,n]));
+  // Reproject on receipt arrival too, not only on the next SSE event. The scene
+  // owns live placement; the fallback below owns legacy/settled presentation.
+  if(S.activeStreamId&&$('liveAssistantTurn')&&Array.from(S._userInputs.values()).some(r=>r.stream_id===S.activeStreamId)){
+    _renderLiveAnchorActivitySceneForStream(S.activeStreamId,sid);
+  }
+  const liveInputs=new Map(Array.from(inner.querySelectorAll('#liveAssistantTurn .user-input-receipt[data-anchor-scene-row="1"]')).map(n=>[n.dataset.userInputId,n]));
+  const existing=new Map();
+  for(const node of inner.querySelectorAll('.user-input-receipt')){
+    const live=liveInputs.get(node.dataset.userInputId);
+    if(live){if(node!==live) node.remove();}
+    else existing.set(node.dataset.userInputId,node);
+  }
   const lastByTarget=new Map();
   const inputs=Array.from(S._userInputs.values()).sort((a,b)=>a.timestamp-b.timestamp);
   for(const receipt of inputs){
-    if(!['steer','clarify'].includes(receipt.kind)||typeof receipt.content!=='string') continue;
+    if(!['steer','clarify'].includes(receipt.kind)||typeof receipt.content!=='string'||liveInputs.has(receipt.input_id)) continue;
     // Prefer an exact run owner. Timestamp fallback covers older/hidden scenes;
     // inputs outside the loaded history stay out until their owning turn loads.
     let target=Array.from(inner.querySelectorAll('[data-anchor-stream-id]')).find(n=>n.getAttribute('data-anchor-stream-id')===receipt.stream_id)?.closest('.assistant-turn');
@@ -16999,17 +17050,14 @@ function _renderUserInputReceipts(){
       }
     }
     if(!target) continue;
-    let row=existing.get(receipt.input_id);
-    if(!row){row=document.createElement('div');row.className='msg-row user-input-receipt';row.dataset.role='user';row.dataset.userInputId=receipt.input_id;}
-    const label=t(receipt.kind==='steer'?'user_input_steer':'user_input_answer');
-    const html=`<div class="msg-body" style="white-space:pre-wrap">${esc(receipt.content)}</div><div class="msg-foot"><span class="msg-time">${esc(label)} · ${esc(_formatMessageFooterTimestamp(receipt.timestamp))}</span></div>`;
-    if(row.innerHTML!==html) row.innerHTML=html;
+    const row=_userInputReceiptNode(receipt,existing.get(receipt.input_id));
     const previous=lastByTarget.get(target);
     const finalSegment=target.id!=='liveAssistantTurn'
       ? Array.from(target.querySelectorAll('.assistant-segment')).filter(n=>!n.classList.contains('assistant-segment-worklog-source')&&n.style.display!=='none').pop()
       : null;
     if(previous) previous.after(row);
     else if(finalSegment) finalSegment.before(row);
+    else if(target.id==='liveAssistantTurn') target.before(row);
     else target.after(row);
     lastByTarget.set(target,row);
     existing.delete(receipt.input_id);

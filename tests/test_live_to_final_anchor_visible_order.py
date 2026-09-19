@@ -1413,6 +1413,7 @@ global._syncToolCallGroupSummary=()=>{{}};
 
     eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
     eval(extractFunc('_anchorSceneTransparentNodeForRow'));
+    eval(extractFunc('_liveSceneRowsWithUserInputs'));
     eval(extractFunc('renderLiveAnchorActivityScene'));
     eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
     eval(extractFunc('_transparentLiveRowKey'));

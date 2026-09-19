@@ -693,6 +693,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
 
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
+        eval({json.dumps(_function_source(_ui_js(), "_renderUserInputReceipts"))});
         eval({json.dumps(render_source)});
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
