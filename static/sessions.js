@@ -3938,6 +3938,8 @@ async function _loadOlderMessages() {
     // Scroll anchoring must use the projected prefix, not the API page length.
     const prependedMessages=nextMessages===unreconciledMessages?olderMsgs:
       _prependedRunningHistory(nextMessages,currentMsgs,olderMsgs);
+    const priorToolCalls=(S.toolCalls||[]).map(call=>Number.isInteger(call.assistant_msg_idx)&&call.assistant_msg_idx>=0
+      ? {...call,assistant_msg_idx:call.assistant_msg_idx+prependedMessages.length} : call);
     S.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
     // renderMessages() windows long transcripts from the end. If we do not
@@ -3959,7 +3961,7 @@ async function _loadOlderMessages() {
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
-    renderMessages({ preserveScroll: true });
+    renderMessages({ preserveScroll: true, reuseSettledTurns: true, priorToolCalls, prependedHistory: prependedMessages.length });
     if (container) {
       // Prepending older messages must not teleport the reader. Anchor to the
       // first visible rendered row and restore that row's top offset after the

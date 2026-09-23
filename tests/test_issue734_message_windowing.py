@@ -23,7 +23,7 @@ def test_load_earlier_only_pages_server_history_and_preserves_scroll():
     assert "if(hasServerOlder){" in UI_JS
     assert "if(virtualWindow.virtualized&&virtualWindow.topPad>0)" in UI_JS
     assert "_messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);" in SESSIONS_JS
-    assert "renderMessages({ preserveScroll: true });" in SESSIONS_JS
+    assert "renderMessages({ preserveScroll: true, reuseSettledTurns: true, priorToolCalls, prependedHistory: prependedMessages.length });" in SESSIONS_JS
     assert "_scheduleMessageVirtualizedRender();" in UI_JS
 
 

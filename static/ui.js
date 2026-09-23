@@ -17125,7 +17125,7 @@ function _processWakeupCardHtml(info, rawText, extras){
 
 // Only complete, unchanged historical turns are reusable. The live/latest
 // turn and mixed compression/handoff UI remain on the ordinary renderer path.
-function _settledTurnMemoInput(start, visible, toolCalls){
+function _settledTurnMemoInput(start, visible, toolCalls, renderToolIndices){
   if(S.messages[start]&&S.messages[start]._source==='process_wakeup') return null;
   const boundary=visible.find(entry=>entry.rawIdx>start&&(entry.m.role!=='assistant'||entry.m._source==='process_wakeup'));
   if(!boundary) return null;
@@ -17158,7 +17158,10 @@ function _settledTurnMemoInput(start, visible, toolCalls){
     (Array.isArray(message.content)&&message.content.some(part=>part&&part.type==='tool_result'&&toolIds.has(part.tool_use_id)))
   )):[];
   const presentation=[new Date().toDateString(),session.session_id,session.model,session.model_provider,session.profile,
-    session.workspace,typeof _oldestIdx==='undefined'?0:_oldestIdx,
+    session.read_only,session.is_read_only,
+    typeof _isBranchableReadOnlySession==='function'&&_isBranchableReadOnlySession(session),
+    session.compression_anchor_visible_idx,session.compression_anchor_message_key,session.compression_anchor_summary,
+    session.workspace,(typeof _oldestIdx==='undefined'?0:_oldestIdx)+start,
     typeof _serverTz==='undefined'?'':_serverTz,
     chatActivityMode(),window._showThinking,window._simplifiedToolCalling,window._showTokenUsage,
     window._worklogDetailsExpandedByDefault,window._transparentEventTimestamps,
@@ -17184,8 +17187,59 @@ function _settledTurnMemoInput(start, visible, toolCalls){
   // Segment/burst routing can override assistant_msg_idx. Those legacy routes
   // stay on the full renderer until their complete ownership can be proven.
   if([...turnTools,...persistedTools].some(call=>call&&(call.activitySegmentSeq||call.activityBurstId))) return null;
-  try{return {start,end,signature:JSON.stringify([presentation,messages,linkedResults,
-    turnTools,persistedTools])};}catch(_){return null;}
+  const relativeTools=calls=>calls.map(call=>{
+    const idx=call&&call.assistant_msg_idx;
+    return Number.isInteger(idx)&&idx>=0?{...call,assistant_msg_idx:idx-start}:call;
+  });
+  // Badge decisions consume render-start metadata, before legacy derivation.
+  // Keep that input separate from priorToolCalls used to compare derived data.
+  const gateIndices=renderToolIndices||new Set((S.toolCalls||[]).map(call=>call?.assistant_msg_idx));
+  const toolGate=JSON.stringify(Array.from(gateIndices).filter(idx=>Number.isInteger(idx)&&idx>=start&&idx<end)
+    .map(idx=>idx-start).sort((a,b)=>a-b));
+  try{return {start,end,toolGate,base:typeof _oldestIdx==='undefined'?0:_oldestIdx,
+    signature:JSON.stringify([presentation,previous?.m,messages,linkedResults,
+      relativeTools(turnTools),relativeTools(persistedTools)])};}catch(_){return null;}
+}
+
+// Pagination moves window-relative indices, not the identity of a settled turn.
+// Legacy and scene-backed compact turns use DOM-owned disclosure handlers.
+// Transparent Stream's earlier-step closures remain on the full-render path.
+function _canRebaseSettledTurn(turn,start,visible){
+  if(!isCompactWorklogMode()) return false;
+  const previous=visible.findLast(entry=>entry.rawIdx<start);
+  if(previous?.m.role!=='user'||turn.querySelector('.transparent-event-row')) return false;
+  // Generated persisted-update rows encode indices in JSON keys and deferred
+  // data, not just attributes. Rebuild these rather than guessing at identity.
+  for(const node of turn.querySelectorAll('[data-compact-row-key],[data-compact-update-key],[data-worklog-rows-deferred]')){
+    if((node.getAttribute('data-compact-row-key')||'').includes('persisted-update:')||
+      (node.getAttribute('data-compact-update-key')||'').includes('persisted-update:')||
+      node._deferredWorklogRows?.some(row=>String(row.row_id||'').startsWith('persisted-update:'))) return false;
+  }
+  return true;
+}
+function _rebaseSettledTurn(turn,delta){
+  const keyAttrs=['data-tool-worklog-key','data-worklog-anchor-key','data-activity-disclosure-key',
+    'data-compact-update-key','data-tool-group-disclosure-key','data-thinking-key'];
+  const selector=['[data-msg-idx]','[data-recycle-key]','[data-anchor-owner-idx]','[onclick]',
+    ...keyAttrs.map(attr=>`[${attr}]`)].join(',');
+  for(const node of [turn,...turn.querySelectorAll(selector)]){
+    for(const attr of keyAttrs){
+      const key=node.getAttribute(attr)||'';
+      const match=/^((?:thinking:|update:)?(?:anchor-scene:|msg:|anchor:|assistant:))(\d+)((?::step:\d+)?)$/.exec(key);
+      if(match) node.setAttribute(attr,match[1]+(Number(match[2])+delta)+match[3]);
+    }
+    for(const attr of ['data-msg-idx','data-recycle-key','data-anchor-owner-idx']){
+      const value=node.getAttribute(attr);
+      if(value!==null&&/^-?\d+$/.test(value)&&Number.isSafeInteger(Number(value)+delta)){
+        node.setAttribute(attr,String(Number(value)+delta));
+      }
+    }
+    const action=node.getAttribute('onclick')||'';
+    const fork=/^forkFromMessage\((\d+)\)$/.exec(action);
+    const jump=/^jumpToTurnQuestion\((-?\d+),(-?\d+)\)$/.exec(action);
+    if(fork) node.setAttribute('onclick',`forkFromMessage(${Number(fork[1])+delta})`);
+    if(jump) node.setAttribute('onclick',`jumpToTurnQuestion(${Number(jump[1])<0?-1:Number(jump[1])+delta},${Number(jump[2])<0?-1:Number(jump[2])+delta})`);
+  }
 }
 
 function _adoptUserInputReceipts(session){
@@ -17467,7 +17521,6 @@ function renderMessages(options){
   const sessionCompressionSummary=(
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
-  const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
   const reusableTurns=new Map();
   const reusedAssistantIdxs=new Set();
   const reusedTurns=new Set();
@@ -17477,12 +17530,19 @@ function renderMessages(options){
     for(const turn of Array.from(inner.children)){
       const memo=turn._settledTurnMemo;
       if(!memo||turn.dataset.sessionId!==sid) continue;
-      const current=_settledTurnMemoInput(memo.start,renderVisWithIdx,options.priorToolCalls);
-      if(current&&current.end===memo.end&&current.signature===memo.signature){
-        reusableTurns.set(memo.start,{turn,memo:current});
+      const delta=Number.isInteger(memo.base)?memo.base-_messageSessionIndexBase():0;
+      // Both cursor and payload count must describe the same raw-row prefix;
+      // if reconciliation changes that relationship, retain the full-render path.
+      if(delta&&(delta<=0||delta!==options.prependedHistory||!_canRebaseSettledTurn(turn,memo.start+delta,renderVisWithIdx))) continue;
+      const current=_settledTurnMemoInput(memo.start+delta,renderVisWithIdx,options.priorToolCalls);
+      if(current&&current.end===memo.end+delta&&current.signature===memo.signature&&(!delta||current.toolGate===memo.toolGate)){
+        if(delta) _rebaseSettledTurn(turn,delta);
+        turn._settledTurnMemo=current;
+        reusableTurns.set(current.start,{turn,memo:current});
       }
     }
   }
+  const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
   _recycleStash.clear();
   if(_msgNodeRecycleEnabled){
     for(const child of Array.from(inner.children)){
@@ -19026,9 +19086,11 @@ function renderMessages(options){
         delete turn._settledTurnMemo;
         continue;
       }
-      const first=turn.querySelector('.assistant-segment[data-msg-idx]');
-      turn._settledTurnMemo=first?_settledTurnMemoInput(Number(first.dataset.msgIdx),renderVisWithIdx):null;
+      const start=Number(turn.dataset.recycleKey);
+      turn._settledTurnMemo=Number.isInteger(start)?_settledTurnMemoInput(start,renderVisWithIdx,undefined,toolCallAssistantIdxs):null;
     }
+  }else{
+    for(const turn of Array.from(inner.children)) delete turn._settledTurnMemo;
   }
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
