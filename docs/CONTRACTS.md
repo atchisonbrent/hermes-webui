@@ -23,6 +23,15 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+Cron completion polling is a read-only observation path. On agents supporting
+`use_cron_store`, it binds the active profile's store without changing global
+environment variables or waiting for job execution. Older agents use the legacy
+profile context only if immediately available; contention returns HTTP 503.
+The browser permits only one pending completion poll, preserves its cursor on
+transport failure, and suppresses background timeout toasts. Actual job completion
+alerts retain their per-job preference and profile-generation fence. Other cron
+controls still use the existing execution/profile serialization.
+
 Explicit bare-model provider selections must retain that provider even when it is
 also the profile default and its static model catalog lags. Preserve the selected
 provider's configured endpoint; another provider's overlapping model list is not

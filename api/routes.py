@@ -14824,11 +14824,14 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
-        from api.profiles import cron_profile_context
+        from api.profiles import CronProfileBusy, cron_read_profile_context
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
-            return _handle_cron_recent(handler, parsed)
+        _ensure_agent_cron_import_path()
+        try:
+            with cron_read_profile_context():
+                return _handle_cron_recent(handler, parsed)
+        except CronProfileBusy:
+            return j(handler, {"error": "Cron profile is busy"}, status=503)
 
     if parsed.path == "/api/crons/status":
         from api.profiles import cron_profile_context

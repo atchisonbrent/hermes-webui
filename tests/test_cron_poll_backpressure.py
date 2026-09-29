@@ -62,3 +62,4 @@ global.updateCronBadge=()=>{};
 '''
     result = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
+    assert "poll lifecycle verified" in result.stdout

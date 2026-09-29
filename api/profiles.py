@@ -731,6 +731,28 @@ class cron_profile_context_for_home:
         return False
 
 
+class CronProfileBusy(TimeoutError):
+    """The legacy cron execution context is currently owned by another call."""
+
+
+@contextmanager
+def cron_read_profile_context():
+    """Pin storage without the execution lock for read-only cron consumers.
+
+    Older agents lack context-local storage. Their fallback fails fast when a
+    job owns the legacy environment lock rather than queueing HTTP threads.
+    Only use for consumers of cron.jobs storage, not scheduler execution.
+    """
+    try:
+        from cron.jobs import use_cron_store
+    except ImportError:
+        with cron_profile_context(blocking=False):
+            yield
+    else:
+        with use_cron_store(get_active_hermes_home()):
+            yield
+
+
 class cron_profile_context:
     """Context manager that pins HERMES_HOME to the TLS-active profile.
 
@@ -743,8 +765,12 @@ class cron_profile_context:
     serialization cost is negligible compared to correctness).
     """
 
+    def __init__(self, *, blocking=True):
+        self._blocking = blocking
+
     def __enter__(self):
-        _cron_env_lock.acquire()
+        if not _cron_env_lock.acquire(blocking=self._blocking):
+            raise CronProfileBusy("Cron profile is busy")
         _push_cron_profile_context_depth()
         try:
             self._prev_env = os.environ.get('HERMES_HOME')
