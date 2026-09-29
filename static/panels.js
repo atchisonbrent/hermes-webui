@@ -13010,11 +13010,13 @@ window.addEventListener('hermes:cron_created', () => {
 
 function startCronPolling(){
   if(_cronPollTimer) return;
+  let inFlight=false;
   _cronPollTimer=setInterval(async()=>{
-    if(document.hidden) return;  // don't poll when tab is in background
+    if(document.hidden||inFlight) return;
+    inFlight=true;
     try{
       const pollGeneration=_cronPollGeneration;
-      const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+      const data=await api(`/api/crons/recent?since=${_cronPollSince}`,{timeoutToast:false,retries:0});
       if(pollGeneration!==_cronPollGeneration) return;
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
@@ -13034,7 +13036,7 @@ function startCronPolling(){
         // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
         updateCronBadge();
       }
-    }catch(e){}
+    }catch(e){}finally{inFlight=false;}
   },30000);
 }
 
