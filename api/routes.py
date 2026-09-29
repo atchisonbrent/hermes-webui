@@ -7957,11 +7957,12 @@ def _should_accept_session_context_length_refresh(
     return model_changed or not (resolved == 256_000 and persisted > resolved)
 
 
-def _rescale_threshold_tokens_for_context_window(
+def _observed_threshold_tokens_for_context_window(
     threshold: int,
     old_window: int,
     new_window: int,
 ) -> int:
+    """Keep an observed runtime trigger; display metadata cannot rescale policy."""
     try:
         threshold = int(threshold or 0)
         old_window = int(old_window or 0)
@@ -7970,7 +7971,7 @@ def _rescale_threshold_tokens_for_context_window(
         return 0
     if threshold <= 0 or old_window <= 0 or new_window <= 0:
         return 0
-    return max(1, int(threshold * new_window / old_window))
+    return threshold
 
 
 def _worktree_default_from_config(profile: str | None) -> bool:
@@ -13470,12 +13471,12 @@ def _handle_session_get(handler, parsed) -> bool:
                 _fb_cl,
                 model_changed=_model_changed_for_context,
             ):
-                if _persisted_cl and _fb_cl != _persisted_cl:
-                    # The old threshold belongs to the old window. Hiding it
-                    # is less useful than keeping the same compression ratio
-                    # against the freshly resolved context length.
-                    _threshold_tokens = _rescale_threshold_tokens_for_context_window(
-                        _threshold_tokens,
+                if _model_changed_for_context or (_persisted_cl and _fb_cl != _persisted_cl):
+                    # A metadata refresh does not reconfigure compression.
+                    # Keep the last observed trigger for the same model; a model
+                    # switch invalidates that observation until the next run.
+                    _threshold_tokens = _observed_threshold_tokens_for_context_window(
+                        0 if _model_changed_for_context else _threshold_tokens,
                         _persisted_cl,
                         _fb_cl,
                     )

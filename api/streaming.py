@@ -9394,22 +9394,12 @@ def _run_agent_streaming(
                         _real_ctx_cache[0] = _resolved_real
                     # Apply the cached real cap when the guard determined one.
                     if _real_ctx_cache[0]:
-                        # Also rescale threshold_tokens by the same ratio so the
-                        # auto-compress trigger reflects the real window, not
-                        # the stale global cap (e.g. 197.2k @ 232K cap → ~850k
-                        # @ 1M real cap).
-                        _orig_cc_cl = getattr(_cc, 'context_length', 0) or 0
-                        _orig_thresh = getattr(_cc, 'threshold_tokens', 0) or 0
-                        _cc_cl_u = _real_ctx_cache[0]
-                        if _orig_cc_cl > 0 and _orig_thresh > 0:
-                            _scaled_thresh = int(_orig_thresh * _real_ctx_cache[0] / _orig_cc_cl)
-                            _usage['context_length'] = _cc_cl_u
-                            _usage['threshold_tokens'] = _scaled_thresh
-                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
-                        else:
-                            _usage['context_length'] = _cc_cl_u
-                            _usage['threshold_tokens'] = _orig_thresh
-                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                        # Metadata correction is display-only. Preserve the actual
+                        # compressor trigger: scaling it invents a threshold that
+                        # the agent never uses (especially with absolute caps).
+                        _usage['context_length'] = _real_ctx_cache[0]
+                        _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
+                        _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
                     else:
                         _usage['context_length'] = _cc_cl_u
                         _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
@@ -12087,9 +12077,9 @@ def _run_agent_streaming(
                 # returns them on reload instead of falling back to 0.
                 _cc_for_save = getattr(agent, 'context_compressor', None)
                 # Initialized before the compressor block so the #3256/#3263
-                # threshold-rescale below is safe even when there is no
+                # threshold-preservation block below is safe without a
                 # compressor (fresh agent / interrupted stream): _skip_cc_cl
-                # stays False and _cc_cl stays 0, so the rescale is a no-op.
+                # stays False and _cc_cl stays 0, so it is a no-op.
                 _skip_cc_cl = False
                 _cc_cl = 0
                 if _cc_for_save:
@@ -12217,21 +12207,15 @@ def _run_agent_streaming(
                         # Older hermes-agent builds may not expose this helper.
                         # Better to leave context_length=0 than crash the save.
                         pass
-                # #3256/#3263: when we skipped the stale compressor cap for a
-                # non-default model and recomputed the real per-model window
-                # above, rescale the persisted threshold_tokens to that real cap
-                # so the auto-compress trigger and the reloaded context-ring
-                # match the live snapshot (which already rescales). Without this,
-                # a reload shows a smaller compression trigger than streaming did.
-                # Only rescale when both the original cap and threshold are
-                # positive; otherwise clear the threshold to 0 (consistent with
-                # the live-snapshot path) rather than leave a stale value.
+                # Persist the observed runtime trigger, not a ratio-scaled guess.
+                # Correcting display metadata does not reconfigure the compressor.
+                # Invalid windows still clear the observation as before.
                 if _skip_cc_cl:
                     _orig_cap = _cc_cl  # the stale global cap the compressor reported
                     _orig_thresh = getattr(s, 'threshold_tokens', 0) or 0
                     _real_cap = getattr(s, 'context_length', 0) or 0
                     if _real_cap > 0 and _orig_cap > 0 and _orig_thresh > 0:
-                        s.threshold_tokens = int(_orig_thresh * _real_cap / _orig_cap)
+                        s.threshold_tokens = _orig_thresh
                     else:
                         s.threshold_tokens = 0
                 if not ephemeral and s.messages:
@@ -12473,10 +12457,8 @@ def _run_agent_streaming(
             _cc = getattr(agent, 'context_compressor', None)
             if _cc:
                 _cc_cl_sse = getattr(_cc, 'context_length', 0) or 0
-                # #3256/#3263: remember the original compressor cap + threshold
-                # so that if we drop the stale cap below and the fallback
-                # resolves the real per-model window, we can rescale the
-                # threshold consistently (the live snapshot already does this).
+                # Snapshot the observed trigger for the defensive re-assertion
+                # after display-window fallback; metadata cannot change policy.
                 _orig_cc_cl_sse = _cc_cl_sse
                 _orig_cc_thresh_sse = getattr(_cc, 'threshold_tokens', 0) or 0
                 _dropped_stale_cap_sse = False
@@ -12570,15 +12552,11 @@ def _run_agent_streaming(
                         )
                     if _fb_cl:
                         usage['context_length'] = _fb_cl
-                        # #3256/#3263: if we dropped the stale compressor cap
-                        # for a non-default model, the threshold_tokens written
-                        # above is still the stale compressor value. Rescale it
-                        # to the real resolved window so the terminal `done`
-                        # payload matches the live snapshot (which rescales) —
-                        # otherwise messages.js overwrites S.lastUsage with the
-                        # stale threshold and the indicator reverts on stream end.
+                        # Defensively re-assert the observed trigger after the
+                        # window fallback. This matches live metering/persistence;
+                        # a display correction must not change runtime policy.
                         if _dropped_stale_cap_sse and _orig_cc_cl_sse > 0 and _orig_cc_thresh_sse > 0:
-                            usage['threshold_tokens'] = int(_orig_cc_thresh_sse * _fb_cl / _orig_cc_cl_sse)
+                            usage['threshold_tokens'] = _orig_cc_thresh_sse
                 except Exception:
                     pass
             # Fallback: when last_prompt_tokens is missing (no compressor), use the

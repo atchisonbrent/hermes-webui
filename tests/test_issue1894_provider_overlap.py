@@ -61,8 +61,8 @@ def test_selected_opencode_go_wins_over_custom_provider_overlap():
         'models': {'deepseek-v4-pro': {}},
     }]
     try:
-        # model_with_provider_context strips the prefix when config_provider
-        # equals the selected provider — deepseek-v4-pro is passed bare.
+        # The send path retains the selected provider explicitly; the direct
+        # resolver test below independently exercises catalog ownership.
         wrapped = model_with_provider_context('deepseek-v4-pro', 'opencode-go')
         model, provider, base_url = resolve_model_provider(wrapped)
         assert provider == 'opencode-go', (

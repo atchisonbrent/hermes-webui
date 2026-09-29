@@ -3029,6 +3029,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             and provider_hint.lower() in _custom_endpoint_slugs_for_base_url(config_base_url)
         ):
             return _finalize(bare_model, config_provider, config_base_url)
+        # Qualifying the active provider must preserve its configured proxy URL.
+        if provider_hint == config_provider:
+            return _finalize(bare_model, provider_hint, config_base_url or _get_provider_base_url(provider_hint))
         return _finalize(bare_model, provider_hint, _get_provider_base_url(provider_hint))
 
     if "/" in model_id:
@@ -3318,8 +3321,8 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     Session persistence keeps the user's selected provider in ``model_provider``
     instead of forcing every selected model into ``@provider:model`` form. At
     runtime, however, ``resolve_model_provider()`` still understands that
-    internal disambiguation form, so use it only when the provider context is
-    needed to route away from the current default provider.
+    internal disambiguation form. Preserve bare-model provider selections even
+    when they match the default; static catalogs are not selection authority.
     """
     model = str(model_id or "").strip()
     provider = str(model_provider or "").strip().lower()
@@ -3346,10 +3349,14 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if _is_plugin_model_provider(provider):
         return f"@{provider}:{model}"
 
-    # If the selected provider is already the configured provider, leaving the
-    # model bare preserves provider-specific base_url/proxy settings.
+    # Keep explicit selection even when it matches the profile default. A bare
+    # non-default model can otherwise be claimed by another provider's catalog.
     if provider == config_provider:
-        return model
+        # Slash IDs and local pseudo-providers retain endpoint normalization;
+        # @custom:model:tag is ambiguous with a named custom-provider identity.
+        if "/" in model or provider in {"custom", "local"} or provider.startswith("custom:"):
+            return model
+        return f"@{provider}:{model}"
 
     # OpenRouter selections with slash IDs are explicit provider/model paths.
     if provider == "openrouter":

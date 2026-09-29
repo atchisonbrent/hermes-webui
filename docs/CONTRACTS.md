@@ -23,6 +23,19 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+Explicit bare-model provider selections must retain that provider even when it is
+also the profile default and its static model catalog lags. Preserve the selected
+provider's configured endpoint; another provider's overlapping model list is not
+permission to reroute the request. Existing slash-ID portal/proxy normalization
+and bare `custom`/legacy `local` endpoint normalization remain separate.
+
+Compression `threshold_tokens` is an observation of the runtime compressor, not
+a ratio inferred from display metadata. Live metering, settled SSE, persistence,
+and same-model hydration preserve that observed trigger when a display window is
+corrected. A model/provider change clears the old observation until a new run
+reports its trigger. This supersedes the earlier display-only threshold rescaling
+rule; the change does not modify the agent's compression policy or model capacity.
+
 - [`docs/rfcs/webui-run-state-consistency-contract.md`](rfcs/webui-run-state-consistency-contract.md):
   proposed consistency rules for current WebUI streaming, recovery, replay,
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata
