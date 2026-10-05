@@ -112,6 +112,26 @@ def _render(driver_path: str, markdown: str) -> str:
     return result.stdout
 
 
+@pytest.mark.parametrize('separator', [' ', '\t', '  '])
+def test_media_token_accepts_horizontal_space(driver_path, separator):
+    html = _render(driver_path, f"MEDIA:{separator}/tmp/chart.png")
+    assert '<img' in html
+    assert 'api/media?path=%2Ftmp%2Fchart.png' in html
+    assert 'MEDIA:' not in html
+
+
+def test_media_token_does_not_consume_next_line(driver_path):
+    html = _render(driver_path, 'MEDIA:\n/tmp/chart.png')
+    assert '<img' not in html
+    assert 'MEDIA:' in html and '/tmp/chart.png' in html
+
+
+def test_spaced_extensionless_media_keeps_visible_label(driver_path):
+    html = _render(driver_path, 'MEDIA: none')
+    assert 'none</a>' in html
+    assert '<img' not in html
+
+
 def test_markdown_data_image_renders_img(driver_path):
     html = _render(driver_path, f"![chart]({PNG_URI})")
     assert f'src="{PNG_URI}"' in html

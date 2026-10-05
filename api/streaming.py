@@ -1633,12 +1633,24 @@ def _classify_provider_error(
             'hint': 'The conversation context is too large to compress safely. Start a new conversation or retry with a narrower task.',
         }
     if silent_failure:
+        result_messages = result.get('messages') if isinstance(result, dict) else None
+        last_message = result_messages[-1] if isinstance(result_messages, list) and result_messages else None
+        if (
+            isinstance(last_message, dict)
+            and last_message.get('finish_reason') == 'stop'
+            and _is_reasoning_only_assistant_message(last_message)
+        ):
+            return {
+                'label': 'Model produced no final answer',
+                'type': 'reasoning_only',
+                'hint': 'The model stopped after producing reasoning but no final answer. Its work may be incomplete. Check completed tool actions before retrying; disabling reasoning may help with this model.',
+            }
         return {
             'label': 'No response from provider',
             # Preserve the existing no_response event type (#373) while making
             # the catch-all silent-failure message more specific for #1765.
             'type': 'no_response',
-            'hint': 'The provider returned no content and no error. This often means a usage/rate limit was hit silently. Check provider status, switch providers via `hermes model`, or try again in a moment.',
+            'hint': 'The provider returned no content and no error. The cause is unknown. Check provider logs and completed tool actions before retrying.',
         }
     return {'label': 'Error', 'type': 'error', 'hint': ''}
 
@@ -11520,7 +11532,7 @@ def _run_agent_streaming(
                 if (
                     _terminal_failure
                     and (_soft_partial_terminal_failure or _tool_limit_reached)
-                    and _classification['type'] == 'no_response'
+                    and _classification['type'] in {'no_response', 'reasoning_only'}
                     and not _saved_transcript_lacks_final_answer
                 ):
                     _terminal_failure = False

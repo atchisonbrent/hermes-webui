@@ -232,7 +232,8 @@ def test_media_capture_allowed_denies_hermes_state(tmp_path, monkeypatch):
 # ── annotate_media_snapshots ───────────────────────────────────────────────
 
 
-def test_annotate_stamps_assistant_messages_with_snapshots(snap_dir, tmp_path):
+@pytest.mark.parametrize('separator', ['', ' ', '\t'])
+def test_annotate_stamps_assistant_messages_with_snapshots(snap_dir, tmp_path, separator):
     from api.media_snapshots import annotate_media_snapshots
 
     target = tmp_path / "report.html"
@@ -240,7 +241,7 @@ def test_annotate_stamps_assistant_messages_with_snapshots(snap_dir, tmp_path):
 
     messages = [
         {"role": "user", "content": "please build it"},
-        {"role": "assistant", "content": f"done: MEDIA:{target}"},
+        {"role": "assistant", "content": f"done: MEDIA:{separator}{target}"},
         {"role": "assistant", "content": "no media here"},
     ]
     captured = annotate_media_snapshots(messages)

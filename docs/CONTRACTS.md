@@ -23,6 +23,21 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+MEDIA references permit spaces or tabs after the colon, but not a newline.
+Streaming, settled rendering, session artifact authorization, immutable media
+snapshots and share export use the same horizontal-whitespace rule. Existing
+path authorization, MIME checks and share-root restrictions remain unchanged.
+
+
+A result ending in an assistant `stop` row containing reasoning but no answer is
+not evidence of a rate limit. The in-process streaming adapter reports
+`reasoning_only` when no current-turn final answer survived settlement and persists
+an explicit no-final-answer error. Existing streamed-reasoning retention is unchanged.
+It does not replay tools or promote reasoning into
+a successful answer. Truly empty results retain `no_response` with unknown cause;
+explicit authentication, cancellation and provider errors retain precedence.
+
+
 Cron completion polling is a read-only observation path. On agents supporting
 `use_cron_store`, it binds the active profile's store without changing global
 environment variables or waiting for job execution. Older agents use the legacy

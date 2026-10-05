@@ -199,7 +199,8 @@ def _run_real_smd_media_cases() -> dict:
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
+        "const spaced=renderModes(['MEDIA:', ' ', 'C:/tmp/live.png ']);\n"
+        "console.log(JSON.stringify({spaced, prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -210,6 +211,21 @@ def _run_real_smd_media_cases() -> dict:
         timeout=30,
     )
     return json.loads(completed.stdout)
+
+
+def test_spaced_media_path_is_not_spoken():
+    if not NODE:
+        raise unittest.SkipTest('node not available')
+    source = _extract_js_function(UI_JS, '_stripForTTS')
+    result = subprocess.run([NODE, '-e', source + '\nconsole.log(_stripForTTS("Image MEDIA: /tmp/chart.png"));'], capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == 'Image a file'
+
+
+def test_spaced_media_across_stream_chunks():
+    result = _run_real_smd_media_cases()['spaced']
+    for mode in ['safe', 'fade']:
+        assert 'data-ref="C:/tmp/live.png"' in result[mode]['html']
+        assert 'MEDIA:' not in result[mode]['text']
 
 
 class TestSmdMediaInStream(unittest.TestCase):
@@ -410,7 +426,7 @@ class TestSmdMediaInStream(unittest.TestCase):
         # boundary check must therefore treat a complete http(s) ref as complete
         # even when it has no filename extension.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
+        self.assertIn(r"/^MEDIA:[ \t]*([^", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
     def test_extensionless_https_tail_waits_until_stream_end(self):

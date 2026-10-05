@@ -121,7 +121,7 @@ def _redact_share_paths(text: str, extra_paths) -> str:
 # through unchanged.  file:// references are NOT matched here — they are
 # always rejected at the public-share boundary (absolute, un-scoped).
 _SHARE_MEDIA_RE = re.compile(
-    r"MEDIA:(?!https?://)([^\s\)\]>]+)"
+    r"MEDIA:[ \t]*(?!https?://)([^\s\)\]>]+)"
 )
 
 # Max size (in bytes) for files we'll embed as base64 in a share snapshot.

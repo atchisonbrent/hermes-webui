@@ -104,6 +104,31 @@ def _mock_hermes_modules(monkeypatch):
             sys.modules[name] = prev
 
 
+def test_reasoning_only_stop_persists_specific_terminal_error(monkeypatch, tmp_path):
+    class ReasoningOnlyAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            return {
+                'final_response': 'I should inspect the renderer.',
+                'messages': [
+                    {'role': 'user', 'content': kwargs['user_message']},
+                    {'role': 'assistant', 'content': '', 'finish_reason': 'stop',
+                     'reasoning': 'I should inspect the renderer.',
+                     'api_content': 'I should inspect the renderer.'},
+                ],
+            }
+
+    session = _prepare_session('reasoning-only', 'reasoning-stream', pending_user_message='Show the image')
+    events = _queue_events(_run_stream(monkeypatch, session, 'reasoning-stream', ReasoningOnlyAgent, workspace=str(tmp_path)))
+    errors = [payload for kind, payload in events if kind == 'apperror']
+    assert len(errors) == 1
+    assert errors[0]['type'] == 'reasoning_only'
+    assert session.messages[-1]['_error'] is True
+    assert 'no final answer' in session.messages[-1]['content']
+    assert 'rate limit' not in session.messages[-1]['content'].lower()
+    assert session.active_stream_id is None
+    assert session.pending_user_message is None
+
+
 class MockAgent:
     def __init__(self, **kwargs):
         self.session_id = kwargs.get("session_id")
@@ -617,6 +642,23 @@ def test_live_settlement_empty_hint_does_not_append_empty_emphasis(tmp_path, mon
     assert error_content == "**Error:** synthetic hard failure"
     assert "\n\n**" not in error_content
     assert not error_content.endswith("**")
+
+
+def test_answer_followed_by_reasoning_with_stale_partial_still_settles(tmp_path, monkeypatch):
+    session = _prepare_session('answered-reasoning', 'answered-stream', pending_user_message='Finish')
+
+    class AnsweredAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            return {'status': 'partial', 'partial': True, 'messages': [
+                {'role': 'user', 'content': kwargs['user_message']},
+                {'role': 'assistant', 'content': 'Completed answer'},
+                {'role': 'assistant', 'content': '', 'reasoning': 'Supporting thought', 'finish_reason': 'stop'},
+            ]}
+
+    events = _queue_events(_run_stream(monkeypatch, session, 'answered-stream', AnsweredAgent, workspace=str(tmp_path)))
+    assert any(kind == 'done' for kind, _ in events)
+    assert not any(kind == 'apperror' for kind, _ in events)
+    assert any(m.get('content') == 'Completed answer' for m in session.messages)
 
 
 def test_completed_assistant_answer_with_stale_partial_flag_settles_done(tmp_path, monkeypatch):
