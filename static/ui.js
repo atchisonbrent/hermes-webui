@@ -8367,7 +8367,7 @@ function _getExplicitBusyCommandAction(text){
 function getComposerPrimaryAction(){
   const msg=$('msg');
   const hasContent=_composerHasContent();
-  const locked=!!(msg&&msg.disabled);
+  const locked=!!(msg&&msg.disabled)||!!(S.session&&(S.session.read_only||S.session.is_read_only));
   if(locked) return 'disabled';
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
   const isBusy=!!S.busy||compressionRunning;
@@ -8394,6 +8394,10 @@ function getComposerPrimaryAction(){
 function _applyBusyComposerPlaceholder(){
   const input=$('msg');
   if(!input) return;
+  if(S.session&&(S.session.read_only||S.session.is_read_only)){
+    input.placeholder=t('composer_read_only');
+    return;
+  }
   if(_compressionPlaceholderSaved!==null) return;
   if(input.disabled) return;
   if(_composerHasContent()) return;
@@ -8434,6 +8438,8 @@ function _setComposerPrimaryButtonIcon(btn,action){
 }
 
 function updateSendBtn(){
+  const input=$('msg');
+  if(input) input.readOnly=!!(S.session&&(S.session.read_only||S.session.is_read_only));
   const btn=$('btnSend');
   if(!btn){
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
@@ -8449,7 +8455,8 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(S.session&&(S.session.read_only||S.session.is_read_only)) _btnTitle=_tt('composer_read_only','Read-only conversation');
+    else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');

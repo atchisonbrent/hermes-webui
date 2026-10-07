@@ -63,6 +63,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.models import native_review_source
 
 logger = logging.getLogger(__name__)
 
@@ -563,7 +564,7 @@ def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
     }
     # Profile-less external-agent rows that live outside the Hermes profile tree.
     # Claude Code: scanned from ~/.claude/projects; Codex: scanned from ~/.codex/
-    profile_agnostic_sources = {CLAUDE_CODE_SOURCE}
+    profile_agnostic_sources = {CLAUDE_CODE_SOURCE, 'antigravity'}
     try:
         from api.codex_sessions import CODEX_SOURCE
         profile_agnostic_sources.add(CODEX_SOURCE)
@@ -5245,6 +5246,8 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         KeyError: session not found in any store
         PermissionError: session is read-only (messaging/Claude Code)
     """
+    if _external_review_identity(sid):
+        raise PermissionError("read-only external review session")
     try:
         s = get_session(sid)
         s = _ensure_full_session_before_mutation(sid, s)
@@ -5456,6 +5459,10 @@ def _build_share_metadata_sidecar(
     return session
 
 
+class NativeReviewShareDenied(PermissionError):
+    """The native projection namespace cannot own a public share."""
+
+
 def _resolve_share_session_pair(sid: str, handler):
     """Resolve a shareable session plus the sidecar that stores share metadata.
 
@@ -5465,6 +5472,8 @@ def _resolve_share_session_pair(sid: str, handler):
     share_token/share_created_at persistence; it may be absent for pure external
     sessions that have not yet created local metadata.
     """
+    if str(sid).startswith("antigravity_"):
+        raise NativeReviewShareDenied("Native review projections cannot be publicly shared")
     try:
         stored_session = get_session(sid)
         cli_meta = (
@@ -8038,16 +8047,31 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _external_review_identity(session_id: str) -> dict:
+    """Native external identities never become writable when discovery fails."""
+    for source, label in (("claude_code", "Claude Code"), ("antigravity", "Antigravity")):
+        if native_review_source(session_id) == source:
+            return {"session_id": session_id, "source_tag": source, "raw_source": source,
+                    "source_label": label, "session_source": "external_agent",
+                    "profile": None, "is_cli_session": True, "read_only": True,
+                    "can_resume": False}
+    return {}
+
+
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
     if not session_id:
         return {}
+    identity = _external_review_identity(session_id)
     try:
+        if identity.get("source_tag") == "antigravity":
+            from api.antigravity_sessions import session_metadata
+            return {**(session_metadata(session_id) or {}), **identity}
         for row in get_cli_sessions(all_profiles=all_profiles):
             if row.get("session_id") == session_id:
-                return row
+                return {**row, **identity}
     except Exception:
-        return {}
-    return {}
+        pass
+    return identity
 
 
 def _session_index_marks_was_webui(sid: str) -> bool:
@@ -8214,7 +8238,7 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     # caller, but it is exported in the return tuple and may surface
     # in a future log / user-visible diagnostic.
     cli_meta_source_tag = (cm.get("source_tag") or cm.get("raw_source") or "").strip().lower()
-    if cli_meta_source_tag in {"claude_code", "cron", "external_agent",
+    if cli_meta_source_tag in {"claude_code", "antigravity", "cron", "external_agent",
                                 "gateway", "messaging", "subagent", "unknown"}:
         # gateway/unknown are the platformless gateway fallbacks
         # (gateway/run.py, gateway/slash_commands.py) — they own the
@@ -8233,7 +8257,7 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     # to state.db's source column.  Refuse known-foreign state.db sources.
     if not cli_meta_source_tag and state_db_source:
         state_db_source_tag = state_db_source.strip().lower()
-        if state_db_source_tag in {"claude_code", "cron", "messaging",
+        if state_db_source_tag in {"claude_code", "antigravity", "cron", "messaging",
                                     "external_agent", "gateway", "subagent", "unknown"}:
             return False, f"state_db_source={state_db_source_tag}"
     return True, ""
@@ -8370,6 +8394,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         return None, "was_webui"
     if cli_meta is None:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
+    cli_meta = {**cli_meta, **_external_review_identity(sid)}
     msgs = get_cli_session_messages(sid)
     if not msgs:
         return None, "no_foreign_state"
@@ -8515,6 +8540,8 @@ def _load_branch_source_or_refuse(handler, sid: str):
 
 def _resolve_cli_import_metadata(session_id: str, *, requested_profile=None, allow_all_profiles: bool = False) -> dict:
     cli_meta = _lookup_cli_session_metadata(session_id)
+    if _external_review_identity(session_id):
+        return {**cli_meta, **_external_review_identity(session_id)}
     if cli_meta and (not requested_profile or _profiles_match(cli_meta.get("profile"), requested_profile)):
         return cli_meta
     if not allow_all_profiles:
@@ -10189,15 +10216,18 @@ CLI_VISIBLE_SESSION_CAP = 20
 
 
 def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
-    """Keep only the most recent CLI-visible sessions after filtering."""
+    """Keep bounded native-review and ordinary CLI windows independently."""
     if cli_cap <= 0:
         return sessions
     kept = []
-    cli_seen = 0
+    seen = {"cli": 0, "antigravity": 0}
     for session in sessions:
         if _is_cli_session_for_settings(session):
-            cli_seen += 1
-            if cli_seen > cli_cap:
+            group = "antigravity" if "antigravity" in (
+                session.get("source_tag"), session.get("raw_source")
+            ) else "cli"
+            seen[group] += 1
+            if seen[group] > cli_cap:
                 continue
         kept.append(session)
     return kept
@@ -13614,6 +13644,9 @@ def _handle_session_get(handler, parsed) -> bool:
         ):
             raw["is_cli_session"] = False
             raw["read_only"] = True
+        if _external_review_identity(sid):
+            raw.update(read_only=True, can_resume=False)
+            raw.pop("regeneration_revision", None)
         imported_turn_marker = any(
             isinstance(row, dict) and row.get("_active_turn_token")
             for row in _all_msgs
@@ -13634,7 +13667,7 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if revision:
                 raw["regeneration_revision"] = revision
-        redact = redact_session_data(raw)
+        redact = public_session_projection(raw)
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
         resp = j(handler, {"session": redact})
@@ -15313,6 +15346,26 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         return True
 
+    # Native identity owns the conversation even when a legacy local sidecar
+    # looks writable. New POST routes are denied unless explicitly read-only.
+    native_candidates = [body.get("session_id") if isinstance(body, dict) else None]
+    native_candidates.extend(parse_qs(getattr(parsed, "query", "")).get("session_id", []))
+    for native_sid in native_candidates:
+        native_identity = _external_review_identity(native_sid.strip()) if isinstance(native_sid, str) else {}
+        native_post_allowed = parsed.path == "/api/session/import_cli" or (
+            native_identity.get("source_tag") == "claude_code"
+            and parsed.path in {"/api/share/create", "/api/share/revoke"}
+        )
+        # Classify malformed aliases only to reject them, never repair or look up.
+        if native_identity and (
+            native_sid != native_sid.strip()
+            or not native_sid.startswith(native_identity["source_tag"] + "_")
+            or not native_post_allowed
+        ):
+            if diag:
+                diag.finish()
+            return bad(handler, "Native review sessions are read-only", 403)
+
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
 
@@ -15457,6 +15510,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "session_id is required", 400)
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
+        except NativeReviewShareDenied:
+            return bad(handler, "Native review projections cannot be publicly shared", 403)
         except KeyError:
             return bad(handler, "Session not found", 404)
         try:
@@ -15504,6 +15559,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "session_id is required", 400)
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
+        except NativeReviewShareDenied:
+            return bad(handler, "Native review projections cannot be publicly shared", 403)
         except KeyError:
             return bad(handler, "Session not found", 404)
         target_session = stored_session
@@ -28660,7 +28717,7 @@ def _handle_session_import_cli(handler, body):
                 (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
                 or _is_subagent_child_session_id(sid)
             )
-        if changed:
+        if changed and not _external_review_identity(sid):
             existing.save(touch_updated_at=False)
             publish_session_list_changed(
                 "session_import_cli",

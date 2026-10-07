@@ -213,6 +213,15 @@ _SAFE_SID_CHARS = frozenset(
 )
 
 
+def native_review_source(sid) -> str | None:
+    """Classify reserved IDs, including aliases, for denial; never repair IDs."""
+    if isinstance(sid, str):
+        for source in ("claude_code", "antigravity"):
+            if sid.strip().casefold().startswith(source + "_"):
+                return source
+    return None
+
+
 def is_safe_session_id(sid) -> bool:
     """Return True iff ``sid`` is a non-empty path-safe session id.
 
@@ -1582,6 +1591,10 @@ class Session:
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
+        # A case-insensitive filesystem must not turn an alias into authority
+        # over a different canonical session (including native review sidecars).
+        if data.get('session_id') != sid:
+            return None
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
         if _collapsed_partials:
@@ -1636,6 +1649,8 @@ class Session:
             if not prefix:
                 return cls.load(sid)
             parsed = json.loads(prefix)
+            if parsed.get('session_id') != sid:
+                return None
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
@@ -5769,6 +5784,8 @@ def get_session_for_file_ops(sid: str):
         # access errors. Recovery is deliberately limited to deleted paths.
         return session
     if recovered:
+        if native_review_source(sid):
+            return _ExternalSessionView(str(sid), str(workspace))
         return persist_recovered_workspace_binding(
             session,
             workspace,
@@ -7343,11 +7360,15 @@ def _path_stat_cache_key(path):
 
 
 def _callable_accepts_include_claude_code(callable_obj) -> bool:
+    return _callable_accepts_keyword(callable_obj, 'include_claude_code')
+
+
+def _callable_accepts_keyword(callable_obj, keyword) -> bool:
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):
         return True
-    if 'include_claude_code' in signature.parameters:
+    if keyword in signature.parameters:
         return True
     return any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
@@ -7651,6 +7672,7 @@ def _load_cli_sessions_uncached(
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
+    include_antigravity: bool = True,
 ) -> list:
     cli_sessions = []
     if source_filter in (None, CLAUDE_CODE_SOURCE) and include_claude_code:
@@ -7659,7 +7681,14 @@ def _load_cli_sessions_uncached(
         except Exception:
             logger.debug("Claude Code session scan failed", exc_info=True)
 
-    if source_filter == CLAUDE_CODE_SOURCE:
+    if include_antigravity and source_filter in (None, 'antigravity'):
+        try:
+            from api.antigravity_sessions import list_sessions
+            cli_sessions.extend(list_sessions())
+        except Exception:
+            logger.debug("Antigravity session scan failed", exc_info=True)
+
+    if source_filter in (CLAUDE_CODE_SOURCE, 'antigravity'):
         return cli_sessions
 
 
@@ -8081,6 +8110,14 @@ def get_cli_sessions(
         )
         if not resolve_supports_include_claude_code:
             cache_key = cache_key + (bool(include_claude_code),)
+    try:
+        from api.antigravity_sessions import _root as antigravity_root
+        native_root = antigravity_root()
+        native_cache_key = (_path_cache_key(native_root), _path_stat_cache_key(native_root))
+    except (OSError, RuntimeError, ValueError):
+        logger.debug("Antigravity root resolution failed", exc_info=True)
+        native_cache_key = (None, None)
+    cache_key += native_cache_key
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
@@ -8100,6 +8137,8 @@ def get_cli_sessions(
                 }
                 if loader_supports_include_claude_code:
                     load_kwargs['include_claude_code'] = include_claude_code and idx == 0
+                if _callable_accepts_keyword(_load_cli_sessions_uncached, 'include_antigravity'):
+                    load_kwargs['include_antigravity'] = idx == 0
                 merged.extend(
                     _load_cli_sessions_uncached(
                         ctx_home,
@@ -8108,7 +8147,18 @@ def get_cli_sessions(
                         **load_kwargs,
                     )
                 )
-            return merged
+            # Native external records are profile-independent. Keep one copy
+            # when the same bridge is reached through several Hermes profiles.
+            unique = []
+            seen_external = set()
+            for row in merged:
+                if row.get('session_source') == 'external_agent' and row.get('profile') is None:
+                    identity = (row.get('source_tag'), row.get('session_id'))
+                    if identity in seen_external:
+                        continue
+                    seen_external.add(identity)
+                unique.append(row)
+            return unique
         load_kwargs = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
@@ -10848,6 +10898,9 @@ def get_cli_session_messages(sid, *, profile=None) -> list:
     continuation chain, return the stitched full transcript across all segments
     in chronological order. Returns empty list on any error.
     """
+    if str(sid or '').startswith('antigravity_'):
+        from api.antigravity_sessions import session_messages
+        return session_messages(sid)
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
     return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)

@@ -1185,10 +1185,16 @@ def _redact_nested_message_containers(value, *, _enabled: bool):
 def public_session_projection(session_dict: dict) -> dict:
     """Return a public session payload with redaction and alias stripping.
 
-    Callers use this for every response/export/SSE session payload.  It never
-    mutates the in-memory session or the caller's dictionary.
+    Shared projector for public session payloads; some legacy paths still use
+    the lower-level redactor. This never mutates the in-memory session or the
+    caller's dictionary.
     """
-    return redact_session_data(session_dict)
+    result = redact_session_data(session_dict)
+    session_id = result.get("session_id")
+    if isinstance(session_id, str) and session_id.startswith(("claude_code_", "antigravity_")):
+        # An old sidecar cannot override ownership of a native namespace.
+        result.update(read_only=True, can_resume=False)
+    return result
 
 
 def strip_public_internal_fields(value, *, message_records: bool = False):

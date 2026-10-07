@@ -9,7 +9,7 @@ from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import j
-from api.models import get_session
+from api.models import get_session, native_review_source
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
     safe_resolve_ws,
@@ -212,6 +212,8 @@ def handle_upload(handler):
             return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
         fields, files = parse_multipart(handler.rfile, content_type, content_length)
         session_id = fields.get('session_id', '')
+        if native_review_source(session_id):
+            return j(handler, {'error': 'Native review sessions are read-only'}, status=403)
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
@@ -390,6 +392,8 @@ def handle_upload_extract(handler):
             return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
         fields, files = parse_multipart(handler.rfile, content_type, content_length)
         session_id = fields.get('session_id', '')
+        if native_review_source(session_id):
+            return j(handler, {'error': 'Native review sessions are read-only'}, status=403)
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
@@ -607,6 +611,8 @@ def handle_workspace_upload(handler):
 
         fields, files = parse_multipart(handler.rfile, content_type, content_length)
         session_id = fields.get('session_id', '')
+        if native_review_source(session_id):
+            return j(handler, {'error': 'Native review sessions are read-only'}, status=403)
         subpath = fields.get('path', '')
 
         if not session_id:
