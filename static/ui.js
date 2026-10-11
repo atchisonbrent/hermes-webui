@@ -11317,10 +11317,17 @@ function _assistantAnchorSceneFinalAnswerText(m){
   const text=scene&&typeof scene.final_answer==='string'?scene.final_answer:'';
   return String(text||'').trim()?text:'';
 }
+// Only server-projected public commentary is displayable. Raw provider items
+// contain replay data and are not a presentation fallback.
+function _assistantDisplayCommentary(m){
+  if(!m||m.role!=='assistant'||m.display_kind==='hidden'||!Array.isArray(m.display_commentary)) return [];
+  return m.display_commentary.filter(text=>typeof text==='string'&&text.trim());
+}
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
   if(_assistantAnchorSceneFinalAnswerText(m)) return true;
+  if(_assistantDisplayCommentary(m).length) return true;
   const content=m.content;
   if(typeof content==='string') return !_isAssistantEmptyPlaceholderContent(m, content)&&!!content.trim();
   if(!Array.isArray(content)) return false;
@@ -11444,6 +11451,8 @@ function _assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs){
 }
 function _assistantReasoningPayloadText(m){
   if(!m||m.role!=='assistant') return '';
+  if(typeof m.display_reasoning==='string'&&(m.display_reasoning.trim()||
+    ['reasoning','reasoning_content','reasoning_details'].some(key=>typeof m[key]==='string'&&m[key].trim()))) return m.display_reasoning.trim();
   const direct=m.reasoning_content||m.reasoning||m.thinking||m._reasoning||'';
   if(String(direct||'').trim()) return String(direct).trim();
   if(Array.isArray(m.content)){
@@ -13512,22 +13521,48 @@ function _anchorScenePlaceChildren(parent, nodes){
   }
 }
 // Preserve persisted updates when an older activity scene is incomplete.
-function _compactSceneRowsWithPersistedUpdates(rows, blocks, finalIdx){
+function _compactSceneRowsWithPersistedUpdates(rows, blocks, finalIdx, opts){
   const result=rows.slice();
+  const textKey=text=>String(text||'').replace(/\s+/g,' ').trim();
+  const insert=row=>{
+    const time=_anchorSceneRowTimestampSeconds(row);
+    const next=time?result.findIndex(r=>_anchorSceneRowTimestampSeconds(r)>time):-1;
+    if(next<0) result.push(row);else result.splice(next,0,row);
+  };
   // Older/cropped scenes need not contain every persisted update. Recover only
   // rendered messages in this turn, never infer or mutate transcript history.
   for(const node of blocks.querySelectorAll(':scope > .assistant-segment[data-msg-idx]')){
     const idx=Number(node.dataset.msgIdx);
-    if(!Number.isFinite(idx)||idx>=finalIdx) continue;
-    const text=String(node.getAttribute('data-raw-text')||'').trim();
-    if(!text||_isAssistantEmptyPlaceholderContent(S.messages[idx],text)) continue;
-    if(result.some(r=>r.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(r._proseMessageText||r.text,text))) continue;
+    if(!Number.isFinite(idx)||idx>finalIdx) continue;
     const message=S.messages[idx];
+    const commentary=_assistantDisplayCommentary(message);
+    const absoluteIdx=typeof _messageSessionIndexForRawIdx==='function'?_messageSessionIndexForRawIdx(idx):idx;
     const timestamp=message?._ts||message?.timestamp;
-    const row={role:'prose',row_id:`persisted-update:${idx}`,text,timestamp,source_event_type:'settled_message',group:{assistant_msg_idx:idx}};
-    const time=_anchorSceneRowTimestampSeconds(row);
-    const next=time?result.findIndex(r=>_anchorSceneRowTimestampSeconds(r)>time):-1;
-    if(next<0) result.push(row);else result.splice(next,0,row);
+    const joined=commentary.join('\n\n');
+    for(const [part,text] of commentary.entries()){
+      if(idx===finalIdx&&textKey(text)===textKey(node.getAttribute('data-raw-text'))) continue;
+      if(result.some(row=>row.role==='prose'&&row.source_event_type==='settled_commentary'&&
+        row.group?.assistant_msg_idx===absoluteIdx&&(row.commentary_index===part||row.commentary_index===null))) continue;
+      // Claim a live echo once. After ownership is assigned, identical text in
+      // another assistant message must not disappear behind this occurrence.
+      const mirror=result.findIndex(row=>row.role==='prose'&&row.source_event_type!=='settled_commentary'&&
+        (row.group?.assistant_msg_idx==null||row.group.assistant_msg_idx===absoluteIdx)&&
+        (textKey(row.text)===textKey(text)||textKey(row.text)===textKey(joined)));
+      if(mirror>=0){
+        const row=result[mirror];
+        result[mirror]={...row,source_event_type:'settled_commentary',
+          commentary_index:commentary.length>1&&textKey(row.text)===textKey(joined)?null:part,
+          group:{...row.group,assistant_msg_idx:absoluteIdx}};
+      }else{
+        insert({role:'prose',row_id:`persisted-update:${idx}:${part}`,text,timestamp,
+          source_event_type:'settled_commentary',commentary_index:part,group:{assistant_msg_idx:absoluteIdx}});
+      }
+    }
+    if(idx>=finalIdx||opts?.commentaryOnly) continue;
+    const text=String(node.getAttribute('data-raw-text')||'').trim();
+    if(!text||_isAssistantEmptyPlaceholderContent(message,text)) continue;
+    if(result.some(r=>r.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(r._proseMessageText||r.text,text))) continue;
+    insert({role:'prose',row_id:`persisted-update:${idx}`,text,timestamp,source_event_type:'settled_message',group:{assistant_msg_idx:idx}});
   }
   return result;
 }
@@ -13582,8 +13617,12 @@ function _appendCompactUpdateStep(group, anchor, cards, thinkingText, opts){
   update=_compactUpdateShell(key,update);
   if(anchor?.dataset.msgIdx!==undefined) update.dataset.msgIdx=anchor.dataset.msgIdx;
   const body=update.querySelector('.compact-ai-update-body');
-  if(opts?.includeAnchorReason!==false&&!update.querySelector('.compact-ai-update-prose .msg-body')){
-    const html=_worklogReasonHtmlFromAnchor(anchor);
+  if(!update.querySelector('.compact-ai-update-prose .msg-body')){
+    const message=S.messages?.[Number(anchor?.dataset.msgIdx)];
+    const commentary=_assistantDisplayCommentary(message);
+    const anchorText=String(anchor?.getAttribute('data-raw-text')||'').trim();
+    const html=commentary.filter(text=>text.trim()!==anchorText).map(text=>renderMd(text)).join('')
+      +(opts?.includeAnchorReason!==false?_worklogReasonHtmlFromAnchor(anchor):'');
     if(html){
       const prose=document.createElement('div');
       prose.className='assistant-segment';
@@ -14519,7 +14558,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_settledSceneRowsWithUserInputs(_anchorSceneRowsForRendering(scene,{settled:true}),String(message._anchor_stream_id||scene.stream_id||scene.identity?.stream_id||''),blocks);
+  const rows=_settledSceneRowsWithUserInputs(_compactSceneRowsWithPersistedUpdates(_anchorSceneRowsForRendering(scene,{settled:true}),blocks,rawIdx,{commentaryOnly:true}),String(message._anchor_stream_id||scene.stream_id||scene.identity?.stream_id||''),blocks);
   if(!rows.length) return false;
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   // The assistant segment owns the final answer; pass it so intermediate prose
@@ -14692,7 +14731,7 @@ function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   const scene=message&&message._anchor_activity_scene;
   const blocks=_assistantTurnBlocks(turnEl);
   if(!scene||!blocks){ if(affordanceEl) affordanceEl.remove(); return; }
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];
+  const rows=_compactSceneRowsWithPersistedUpdates(_anchorSceneRowsForRendering(scene,{settled:true})||[],blocks,rawIdx,{commentaryOnly:true});
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   const finalAnswer=String(
     (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
@@ -15972,6 +16011,8 @@ function _messageRenderCacheSignature(){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
     add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
     add(msgContent(m));
+    _addBoundedHash(add,m.display_commentary);
+    add(m.display_reasoning);
     if(Array.isArray(m.content)){
       add('content-array');
       m.content.forEach(part=>{
@@ -18314,6 +18355,39 @@ function renderMessages(options){
       const idx=Number(node.getAttribute('data-msg-idx'));
       if(Number.isFinite(idx)) anchorOwnedAssistantRawIdxs.add(idx);
     });
+    // A persisted steer splits DOM blocks, not the running assistant turn.
+    // Claim hydrated message ownership, or a live scene's tool identity plus
+    // all public prose. Equal text alone is not a cross-block ownership signal.
+    let crossedSteer=false;
+    for(let idx=rawIdx-1;idx>=0;idx--){
+      const earlier=S.messages[idx];
+      if(earlier?.role==='user'){
+        if(earlier.display_kind!=='steer') break;
+        crossedSteer=true;
+      }
+      if(!crossedSteer||earlier?.role!=='assistant') continue;
+      const prose=_assistantDisplayCommentary(earlier);
+      if(msgContent(earlier)) prose.push(msgContent(earlier));
+      const absoluteIdx=_messageSessionIndexForRawIdx(idx);
+      const rows=(Array.isArray(msg._anchor_activity_scene.activity_rows)?msg._anchor_activity_scene.activity_rows:[]).filter(row=>row&&typeof row==='object');
+      const indexed=rows.some(row=>row.group?.assistant_msg_idx===absoluteIdx);
+      const toolIds=(Array.isArray(earlier.tool_calls)?earlier.tool_calls:[]).map(tool=>tool?.id).filter(Boolean);
+      const liveOwned=toolIds.length&&toolIds.every(id=>rows.some(row=>_anchorSceneToolRowLogicalKey(row)===`call:${id}`))&&
+        prose.every(text=>rows.some(row=>row.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(row.text,text)));
+      if(indexed||liveOwned){
+        anchorOwnedAssistantRawIdxs.add(idx);
+        const source=assistantSegments.get(idx);
+        const text=msgContent(earlier);
+        if(source&&text&&(isCompactWorklogMode()||isTransparentStream())&&
+            _anchorSceneSceneHasWorklogWorthyRows(msg._anchor_activity_scene)&&
+            rows.some(row=>row.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(row.text,text))){
+          source.classList.add('assistant-segment-worklog-source');
+          source.setAttribute('data-cross-steer-scene-owner',String(rawIdx));
+          source.setAttribute('aria-hidden','true');
+          source.hidden=true;
+        }
+      }
+    }
   }
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
@@ -18587,9 +18661,9 @@ function renderMessages(options){
     }
     for(const [aIdx,seg] of assistantSegments){
       if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;
-      if(!seg||!seg.classList||!seg.classList.contains('assistant-segment-worklog-source')) continue;
+      if(!seg||!seg.classList||(!seg.classList.contains('assistant-segment-worklog-source')&&!(isCompactWorklogMode()&&_assistantDisplayCommentary(S.messages[aIdx]).length))) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
-      if(!_worklogReasonHtmlFromAnchor(seg)) continue;
+      if(!_worklogReasonHtmlFromAnchor(seg)&&!(isCompactWorklogMode()&&_assistantDisplayCommentary(S.messages[aIdx]).length)) continue;
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
       const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
       const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
@@ -18619,7 +18693,7 @@ function renderMessages(options){
         const anchorParent=anchorRow.parentElement;
         const anchorReasonHtml=_worklogReasonHtmlFromAnchor(anchorRow);
         const thinkingText=thinkingIdx!==null?assistantThinking.get(thinkingIdx):'';
-        if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
+        if(!cards.length&&!anchorReasonHtml&&!thinkingText&&!(isCompactWorklogMode()&&_assistantDisplayCommentary(S.messages[aIdx]).length)) continue;
         const anchorTurn=anchorRow.closest('.assistant-turn');
         if(!anchorTurn) continue;
         let state=activityByTurn.get(anchorTurn);
@@ -18736,6 +18810,12 @@ function renderMessages(options){
     const msg=S.messages[rawIdx];
     if(msg&&msg._anchor_activity_scene){
       _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
+    }else if(seg&&isTransparentStream()&&!anchorOwnedAssistantRawIdxs.has(rawIdx)&&!msg?._live){
+      for(const [part,text] of _assistantDisplayCommentary(msg).entries()){
+        if(text.trim()===String(seg.getAttribute('data-raw-text')||'').trim()) continue;
+        const prose=_anchorSceneNodeForRow({role:'prose',text,row_id:`commentary:${rawIdx}:${part}`},{settled:true});
+        if(prose) seg.before(prose);
+      }
     }
   }
   _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);
@@ -18960,6 +19040,9 @@ function renderMessages(options){
       // segments carry the real text — un-hide them so nothing is lost.
       if(!revealed){
         for(const seg of turn.querySelectorAll('.assistant-segment-worklog-source')){
+          const owner=seg.getAttribute('data-cross-steer-scene-owner');
+          const ownerTurn=owner!==null?assistantSegments.get(Number(owner))?.closest('.assistant-turn'):null;
+          if(ownerTurn?.querySelector('[data-anchor-scene-owner="1"],[data-anchor-settled-scene-row="1"]')) continue;
           if(!(seg.textContent||'').trim()) continue;
           seg.classList.remove('assistant-segment-worklog-source');
           seg.removeAttribute('aria-hidden');

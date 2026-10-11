@@ -10,8 +10,8 @@ from browser_conversation_lifecycle import _start_webui_server, _terminate_proce
 
 ROOT=Path(__file__).resolve().parents[1]
 CHECK="""()=>{
- const turn=$('liveAssistantTurn')||document.querySelector('.assistant-turn');
- const group=turn.querySelector('.tool-worklog-group');
+ const turn=$('liveAssistantTurn')||[...document.querySelectorAll('.assistant-turn')].find(n=>n.querySelector('.tool-worklog-group'));
+ const group=turn?.querySelector('.tool-worklog-group');
  if(!group)throw new Error('Missing worklog');
  if(!group.classList.contains('open'))group.querySelector('.tool-worklog-summary').click();
  const updates=[...group.querySelectorAll('.compact-ai-update')];
@@ -20,6 +20,7 @@ CHECK="""()=>{
  if(rows.some(n=>!n.closest('.compact-ai-update')))throw new Error('Orphan activity');
  const update=updates.find(n=>n.textContent.includes('Checking component A.'));
  if(!update||!update.querySelector('.tool-card-row'))throw new Error('Tool detached from update');
+ if(rows.filter(n=>n.getAttribute('data-anchor-row-role')==='prose'&&n.textContent.trim()==='Checking component A.').length!==1)throw new Error('Commentary missing or duplicated at settlement');
  return {updates:updates.length,rows:rows.length,busy:S.busy};
 }"""
 
@@ -74,6 +75,14 @@ def main():
         if(!update.isConnected||!update.open||nodes.some(n=>!n.isConnected))throw new Error('Live redraw lost identity/open state');
        }""")
        data.update(active_stream_id=None,runtime_journal_snapshot=None,pending_user_message='',messages=[dict(role='user',content='Check components',timestamp=1),dict(role='assistant',content='Checking component A.',timestamp=3,tool_calls=[dict(id='a',type='function',function=dict(name='terminal',arguments='{}'))]),dict(role='tool',tool_call_id='a',content='checked',timestamp=5),dict(role='assistant',content='Final confirmation.',timestamp=9)],message_count=4)
+       if os.environ.get('COMMENTARY')=='1':
+        message=data['messages'][1]
+        message['display_commentary']=[message['content']]
+        message['codex_message_items']=[dict(type='message',role='assistant',phase='commentary',content=[dict(type='output_text',text=message['content'])])]
+        message['content']=''
+       if os.environ.get('STEER')=='1':
+        data['messages'].insert(3,dict(role='user',content='Also inspect B.',display_kind='steer',timestamp=7))
+        data['message_count']=len(data['messages'])
        page.evaluate("data=>LIVE_STREAMS.fixture.source.emit('done',{session:data})",data)
        page.wait_for_timeout(150)
        for stage in ['done','rerender','reload']:
@@ -85,6 +94,8 @@ def main():
           assert time.monotonic()<deadline;page.wait_for_timeout(50)
          page.evaluate("async()=>{window._chatActivityDisplayMode='compact_worklog';await loadSession('fixture');}")
         print(engine,width,stage,page.evaluate(CHECK),flush=True)
+        count=page.locator('.compact-ai-update-prose').filter(has_text='Checking component A.').count()
+        assert count==1, f'{stage}: cross-block commentary count {count}'
         assert page.locator('.assistant-segment').filter(has_text='Final confirmation.').last.is_visible()
         assert page.locator('.anchor-conversation').count()==0
        assert not [e for e in errors if not (('/api/session/status?' in e or '/health?offline_probe=' in e) and 'due to access control checks' in e)],errors

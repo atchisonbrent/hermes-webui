@@ -182,6 +182,8 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
             raw.pop('regeneration_revision', None)
     except Exception:
         raw.pop('regeneration_revision', None)
+    from api.history_display import project_history_for_display
+    raw['messages'] = project_history_for_display(raw['messages'], profile=getattr(session, 'profile', None))
     return raw
 
 

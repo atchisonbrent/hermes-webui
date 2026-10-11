@@ -4217,6 +4217,12 @@ def _anchor_scene_final_answer_text(message) -> str:
 def _anchor_scene_message_reasoning_text(message) -> str:
     if not isinstance(message, dict):
         return ""
+    projected = message.get("display_reasoning")
+    if isinstance(projected, str) and (projected.strip() or any(
+        isinstance(message.get(key), str) and message[key].strip()
+        for key in ("reasoning", "reasoning_content", "reasoning_details")
+    )):
+        return projected
     for key in ("reasoning", "_reasoning", "reasoning_content", "thinking"):
         value = message.get(key)
         if not value:
@@ -4795,6 +4801,9 @@ def _anchor_scene_row_key(row) -> str:
             or row.get("row_id")
             or ""
         )
+    if row.get("role") == "prose" and row.get("source_event_type") == "settled_commentary":
+        group = row.get("group") if isinstance(row.get("group"), dict) else {}
+        return f"commentary:{group.get('assistant_msg_idx')}:{row.get('commentary_index')}"
     if row.get("role") in ("prose", "thinking"):
         return f"{row.get('role')}:{_anchor_scene_text_key(row.get('text'))}"
     if row.get("role") == "lifecycle":
@@ -4860,7 +4869,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     turn_start = -1
     for idx in range(local_final_idx - 1, -1, -1):
         message = messages[idx]
-        if isinstance(message, dict) and message.get("role") == "user":
+        if isinstance(message, dict) and message.get("role") == "user" and message.get("display_kind") != "steer":
             turn_start = idx
             break
     message_final_answer = _anchor_scene_final_answer_text(final_message)
@@ -4971,6 +4980,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         rows.append(next_row)
 
     order = 0
+    commentary_mirrors = {}
     content_tool_indexes_by_idx = {}
     used_content_tool_indexes_by_idx = {}
     id_flexible_content_tool_indexes_by_idx = {}
@@ -4979,6 +4989,27 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         absolute_idx = int(message_offset or 0) + local_idx
+        commentary = message.get("display_commentary")
+        commentary = [text for text in commentary if isinstance(text, str) and text.strip()] if isinstance(commentary, list) else []
+        if commentary:
+            # Thinking belongs beneath this update, not beneath the next one.
+            reasoning = _anchor_scene_message_reasoning_text(message)
+            if _anchor_scene_clean_text(reasoning):
+                push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
+                order += 1
+            for part, text in enumerate(commentary):
+                row = _anchor_scene_prose_row(text, order, absolute_idx, stream_id)
+                row["source_event_type"] = "settled_commentary"
+                row["commentary_index"] = part
+                row["created_at"] = message.get("_ts") or message.get("timestamp")
+                push(row)
+                key = _anchor_scene_text_key(text)
+                commentary_mirrors[key] = commentary_mirrors.get(key, 0) + 1
+                order += 1
+            if len(commentary) > 1:
+                # The agent's non-streaming fallback delivers one joined update.
+                key = _anchor_scene_text_key("\n\n".join(commentary))
+                commentary_mirrors[key] = commentary_mirrors.get(key, 0) + 1
         text = _anchor_scene_message_text(message)
         content_rows = _anchor_scene_content_rows(
             message,
@@ -5004,10 +5035,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         elif _anchor_scene_clean_text(text):
             push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
             order += 1
-        reasoning = _anchor_scene_message_reasoning_text(message)
-        if _anchor_scene_clean_text(reasoning) and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text):
-            push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
-            order += 1
+        if not commentary:
+            reasoning = _anchor_scene_message_reasoning_text(message)
+            if _anchor_scene_clean_text(reasoning) and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text):
+                push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
+                order += 1
         for key in ("tool_calls", "_partial_tool_calls"):
             calls = message.get(key)
             if isinstance(calls, list):
@@ -5087,6 +5119,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         order += 1
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") != "terminal":
+            key = _anchor_scene_text_key(row.get("text"))
+            if (row.get("role") == "prose" and row.get("source_event_type") != "settled_commentary"
+                    and commentary_mirrors.get(key, 0)):
+                commentary_mirrors[key] -= 1
+                continue
             push(row)
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") == "terminal":
@@ -13439,6 +13476,8 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if msg_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
+            from api.history_display import project_history_for_display
+            _truncated_msgs = project_history_for_display(_truncated_msgs, profile=_session_profile)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
                 _truncated_msgs,
                 getattr(s, "anchor_activity_scenes", None),

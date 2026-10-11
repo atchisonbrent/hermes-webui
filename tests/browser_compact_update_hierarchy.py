@@ -41,6 +41,13 @@ def main():
                                     dict(role='tool',tool_call_id='b',content='Second result',timestamp=5),
                                     dict(role='assistant',content='All checks complete.',timestamp=9)]
                                 data['message_count']=len(data['messages'])
+                            if os.environ.get('COMMENTARY')=='1':
+                                for message in data['messages']:
+                                    if message.get('tool_calls'):
+                                        text=message['content']
+                                        message['content']=''
+                                        message['display_commentary']=[text]
+                                        message['codex_message_items']=[dict(type='message',role='assistant',phase='commentary',content=[dict(type='output_text',text=text)])]
                             if os.environ.get('MISSING')=='1':
                                 data['messages'].insert(-1,dict(role='assistant',content='Persisted update absent from old scene.',timestamp=7))
                                 data['message_count']=len(data['messages'])
