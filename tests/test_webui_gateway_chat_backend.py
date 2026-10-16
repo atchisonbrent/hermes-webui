@@ -4,6 +4,7 @@ from email.message import Message
 import json
 from pathlib import Path
 import re
+import threading
 import time
 import urllib.error
 
@@ -24,6 +25,7 @@ from api.gateway_chat import (
     webui_chat_backend_mode,
     webui_gateway_chat_enabled,
 )
+from api.turn_journal import derive_turn_journal_states, read_turn_journal
 
 
 def test_gateway_chat_backend_is_default_off_for_truthy_values():
@@ -270,13 +272,23 @@ def test_gateway_chat_health_payload_is_documented_as_operator_diagnostic_only()
 def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monkeypatch):
     import api.config as config_api
     import api.profiles as profiles_api
-    monkeypatch.setattr(config_api, 'get_config', lambda: {'agent': {'system_prompt': 'WRONG_GLOBAL_OVERLAY'}})
+    monkeypatch.setattr(config_api, 'get_config', lambda: {'agent': {
+        'system_prompt': 'WRONG_GLOBAL_OVERLAY', 'reasoning_effort': 'high'}})
     monkeypatch.setattr(profiles_api, 'get_hermes_home_for_profile', lambda profile: tmp_path / str(profile or 'default'))
     homes = []
     def profile_config(home):
         homes.append(Path(home))
-        return {'agent': {'system_prompt': 'SESSION_PROFILE_OVERLAY'}}
+        return {'agent': {'system_prompt': 'SESSION_PROFILE_OVERLAY',
+                          'reasoning_effort': 'medium',
+                          'reasoning_overrides': {'alias-target-model': 'low'}}}
     monkeypatch.setattr(config_api, 'get_config_for_profile_home', profile_config)
+    monkeypatch.setattr(profiles_api, 'get_profile_runtime_env', lambda home: {
+        'HERMES_WEBUI_GATEWAY_BASE_URL': 'http://profile-gateway.invalid'})
+    request_configs = []
+    def request_overrides(cfg, **kwargs):
+        request_configs.append(cfg)
+        return {}
+    monkeypatch.setattr(config_api, '_main_model_request_overrides', request_overrides)
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
@@ -313,7 +325,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
-    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *args, **kwargs: "high")
+    monkeypatch.setattr(config_api, 'resolve_model_reasoning_efforts', lambda *args, **kwargs: ['low', 'medium', 'high'])
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
         "status": "loaded",
         "source": "test",
@@ -339,13 +351,31 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     subscriber = channel.subscribe()
     STREAMS[stream_id] = channel
 
-    gateway_chat._run_gateway_chat_streaming(
-        s.session_id,
-        "Say hello",
-        "test-model",
-        str(tmp_path),
-        stream_id,
-        [],
+    from api import routes
+
+    monkeypatch.setattr(routes.api_config, "resolve_model_alias_runtime", lambda *_a, **_k: {
+        "alias": "sol", "model": "alias-target-model", "provider": "openai-codex",
+        "api_key": "ambient-provider-key", "base_url": "https://provider.example.test/v1",
+        "base_url_explicit": False, "credential_explicit": False,
+    })
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: False)
+
+    def start_gateway(session, **kw):
+        gateway_chat._run_gateway_chat_streaming(
+            session.session_id, kw["msg"], kw["model"], kw["workspace"], stream_id,
+            kw["attachments"], model_provider=kw["model_provider"],
+            persisted_model=kw["persisted_model"],
+            persisted_model_provider=kw["persisted_model_provider"],
+        )
+        return {"stream_id": stream_id}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", start_gateway)
+    routes._start_run(
+        s, msg="Say hello", model="alias-target-model",
+        model_provider="model-alias-profile-bound-lane", workspace=str(tmp_path),
+        attachments=[], normalized_model=False, source="webui", route="/api/chat/start",
+        gateway_chat_enabled=True,
     )
 
     saved = models.get_session(s.session_id)
@@ -355,17 +385,23 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert isinstance(saved.messages[1]["timestamp"], float)
     assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]
     assert saved.active_stream_id is None
+    assert saved.model == "alias-target-model"
+    assert saved.model_provider == "model-alias-profile-bound-lane"
     assert stream_id not in STREAMS
-    assert captured["url"] == "http://gateway.local/v1/chat/completions"
+    assert captured["url"] == "http://profile-gateway.invalid/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
     assert captured["headers"]["X-hermes-session-id"] == s.session_id
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
-    assert payload["reasoning_effort"] == "high"
+    assert payload["reasoning_effort"] == "low"
+    assert request_configs and all(cfg['agent']['system_prompt'] == 'SESSION_PROFILE_OVERLAY' for cfg in request_configs)
     assert tmp_path / 'profile-test' in homes
     assert captured['body'].count('SESSION_PROFILE_OVERLAY') == 1
     assert 'WRONG_GLOBAL_OVERLAY' not in captured['body']
+    assert payload["model"] == "alias-target-model"
+    assert payload["provider"] == "openai-codex"
+    assert "ambient-provider-key" not in captured["body"]
     # #3324: the gateway path's first system message is now the full WebUI
     # ephemeral system prompt (progress prompt + session/delivery context),
     # NOT the bare _WEBUI_PROGRESS_PROMPT — otherwise the delivery/session
@@ -407,6 +443,73 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "tid": "call-1",
     }) in event_pairs
     assert all(len(item) == 3 and item[2] for item in events)
+
+
+def test_gateway_chat_worker_records_turn_journal_completion(tmp_path, monkeypatch):
+    """#6366 re-gate: a successful Gateway run must record durable
+    same-stream completion evidence in the crash-safe turn journal.
+
+    The stale-cancel recovery predicate derives its completion evidence
+    from the turn journal, so a Gateway run that persisted its final
+    answer but lost the run journal's terminal write would otherwise
+    have no completion evidence at all — and recovery would re-append a
+    duplicate recovered row after the valid final answer.
+    """
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda req, timeout=0: FakeResponse(),
+    )
+
+    s = new_session()
+    stream_id = "stream-gateway-turn-journal-completed"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.pending_started_at = 456
+    s.save()
+    channel = create_stream_channel()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    journal = read_turn_journal(s.session_id, session_dir=session_dir)
+    states, _ = derive_turn_journal_states(journal.get("events") or [])
+    stream_events = [
+        event
+        for event in states.values()
+        if str(event.get("stream_id") or "") == stream_id
+    ]
+    assert stream_events, "expected turn journal events for the gateway stream"
+    assert any(
+        event.get("event") == "completed" for event in stream_events
+    ), "the gateway success writeback must record a completed turn journal event"
 
 
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
@@ -467,10 +570,12 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     gateway_chat._run_gateway_chat_streaming(
         s.session_id,
         "Say hello",
-        "test-model",
+        "east",
         str(tmp_path),
         stream_id,
         [],
+        persisted_model="shared-model",
+        persisted_model_provider="model-alias-profile-bound-lane",
     )
 
     apperrors = [item[1] for item in events if item[0] == "apperror"]
@@ -487,6 +592,8 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert context_users[-1]["timestamp"] == 222
     assert context_users[-1]["attachments"] == [{"name": "current.png"}]
     assert saved.messages[-1].get("_error") is True
+    assert saved.model == "shared-model"
+    assert saved.model_provider == "model-alias-profile-bound-lane"
 
     response_error[0] = ""
     empty_stream_id = "stream-gateway-empty-response-test"
@@ -869,6 +976,104 @@ def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path,
     assert goal_continue_event[1]["message_key"] == "goal_continuing"
     assert saved.messages[-1]["role"] == "assistant"
     assert saved.messages[-1]["content"] == "goal reply"
+
+
+def test_gateway_goal_eval_keeps_runtime_active_after_success_writeback_before_done(
+    tmp_path, monkeypatch
+):
+    """Persisted idle flags can precede terminal emission while STREAMS is still active."""
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"goal reply"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(
+        gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse()
+    )
+
+    from api import goals as webui_goals
+
+    goal_entered = threading.Event()
+    release_goal = threading.Event()
+    observed = {}
+
+    monkeypatch.setattr(webui_goals, "has_active_goal", lambda *args, **kwargs: True)
+
+    def blocked_goal_eval(*args, **kwargs):
+        saved = models.get_session(s.session_id)
+        observed["active_stream_id"] = saved.active_stream_id
+        observed["pending_user_message"] = saved.pending_user_message
+        observed["stream_registered"] = stream_id in STREAMS
+        goal_entered.set()
+        assert release_goal.wait(timeout=10)
+        return {"should_continue": False, "message": "Goal checked"}
+
+    monkeypatch.setattr(webui_goals, "evaluate_goal_after_turn", blocked_goal_eval)
+
+    s = new_session()
+    stream_id = "stream-gateway-goal-runtime-window"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "finish it"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    worker = threading.Thread(
+        target=gateway_chat._run_gateway_chat_streaming,
+        args=(
+            s.session_id,
+            "finish it",
+            "test-model",
+            str(tmp_path),
+            stream_id,
+            [],
+        ),
+        kwargs={"goal_related": True},
+        daemon=True,
+    )
+    worker.start()
+    assert goal_entered.wait(timeout=10), "worker did not reach post-writeback goal evaluation"
+
+    # This is the exact authority split the browser recovery must respect:
+    # persisted session metadata already looks idle, while the runtime stream
+    # (and therefore /api/chat/stream/status) is still active and can emit
+    # goal / goal_continue / done / stream_end.
+    assert observed == {
+        "active_stream_id": None,
+        "pending_user_message": None,
+        "stream_registered": True,
+    }
+    assert stream_id in STREAMS
+    assert worker.is_alive()
+    assert not any(item[0] == "done" for item in list(subscriber.queue))
+
+    release_goal.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    names = [item[0] for item in events]
+    assert "goal" in names
+    assert "done" in names
+    assert "stream_end" in names
+    assert names.index("goal") < names.index("done") < names.index("stream_end")
 
 
 def test_gateway_chat_worker_skips_goal_judge_for_non_goal_turn(tmp_path, monkeypatch):

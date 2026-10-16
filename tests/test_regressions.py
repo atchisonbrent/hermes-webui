@@ -793,7 +793,8 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
     ui_src = (REPO_ROOT / "static/ui.js").read_text()
     fn_start = ui_src.find("function renderMessages")
     assert fn_start >= 0, "renderMessages() not found in ui.js"
-    fn_body = ui_src[fn_start:fn_start + 1400]
+    # Window sized to reach the render-window reset; renderMessages() preamble grows (#6717).
+    fn_body = ui_src[fn_start:fn_start + 2400]
 
     compact = re.sub(r"\s+", "", fn_body)
     assert (
@@ -849,11 +850,14 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     )
     pending_idx = src.find("function _mergePendingSessionMessage")
     assert pending_idx >= 0, "pending session merge helper not found"
-    pending_block = src[pending_idx:pending_idx+500]
+    from tests.test_anchor_fallback_ownership import _function_source
+    pending_block = _function_source(src, '_mergePendingSessionMessage')
     assert "_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)" in pending_block, (
         "pending-user merge should dedupe only against the current active-turn user row"
     )
-    assert "messages.some(" not in pending_block, (
+    import re
+    # Exact stream-owner markers may scan rows; historical content must not dedupe a new turn.
+    assert not re.search(r"messages\.some\([^;]*(?:_normalizeUserTranscriptText|_sameUserTranscriptMessage|\.content)", pending_block), (
         "pending-user merge must not scan historical user rows by normalized content"
     )
 

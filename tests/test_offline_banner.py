@@ -71,7 +71,7 @@ def test_sse_network_error_defers_to_offline_banner_instead_of_inline_error():
     assert "t('offline_stream_waiting')" in MESSAGES_JS
     assert "if(_deferStreamErrorIfOffline()) return;" in MESSAGES_JS
     error_handler = MESSAGES_JS.split("source.addEventListener('error',async e=>{", 1)[1].split("source.addEventListener('cancel'", 1)[0]
-    assert error_handler.find("_deferStreamErrorIfOffline()") < error_handler.rfind("_handleStreamError(source)")
+    assert error_handler.find("_deferStreamErrorIfOffline()") < error_handler.rfind("_retryStreamAfterError(source)")
 
 
 def test_sse_error_defers_while_page_hidden_until_tab_returns():
@@ -83,7 +83,7 @@ def test_sse_error_defers_while_page_hidden_until_tab_returns():
     assert "window.addEventListener('pageshow',resume)" in MESSAGES_JS
     error_handler = MESSAGES_JS.split("source.addEventListener('error',async e=>{", 1)[1].split("source.addEventListener('cancel'", 1)[0]
     assert "if(_deferStreamErrorIfPageHidden(source)) return;" in error_handler
-    assert error_handler.find("_deferStreamErrorIfPageHidden(source)") < error_handler.rfind("_handleStreamError(source)")
+    assert error_handler.find("_deferStreamErrorIfPageHidden(source)") < error_handler.rfind("_retryStreamAfterError(source)")
 
 
 def test_deferred_hidden_stream_error_reattaches_or_restores_before_inline_error():

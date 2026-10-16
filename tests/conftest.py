@@ -175,6 +175,9 @@ os.environ['HERMES_WEBUI_TEST_STATE_DIR'] = str(TEST_STATE_DIR)
 os.environ['HERMES_WEBUI_STATE_DIR'] = str(TEST_STATE_DIR)
 os.environ['HERMES_WEBUI_DEFAULT_WORKSPACE'] = str(TEST_WORKSPACE)
 os.environ['HERMES_HOME'] = str(TEST_STATE_DIR)
+# Never let a test process, or a server.py child that copies os.environ, install Agent
+# dependencies into the test home (pm.install.lazy_installs_allowed / venv_sync.prepare_launch).
+os.environ['HERMES_DISABLE_LAZY_INSTALLS'] = '1'
 os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 # Hermes Agent sessions may inherit HERMES_CONFIG_PATH pointing at the live
 # ~/.hermes/config.yaml.  Override it before any product modules are imported so
@@ -205,6 +208,67 @@ def _isolate_hermes_config_path():
     os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
 
 
+# A test that launches `sys.executable` with an env built from scratch drops the
+# suite's HERMES_DISABLE_LAZY_INSTALLS. On a machine whose Hermes Agent is a
+# PM-managed install, that subprocess then installs a full Agent environment
+# (~1.1 GB) into the test's temp HOME, once per test. A full local suite left
+# ~16 GB behind and filled the disk. CI has no Agent checkout, so it never shows
+# there. Fail the offending test by name instead, so the fix (pass
+# HERMES_DISABLE_LAZY_INSTALLS=1 in the subprocess env) is obvious.
+_AGENT_INSTALL_GLOBS = (
+    "installs/*/environments",
+    "*/installs/*/environments",
+    "*/*/installs/*/environments",
+)
+# Tests that fake a managed install (test_managed_profile_startup) leave a few KB
+# here; a real environment is hundreds of MB. Only flag the real thing.
+_AGENT_INSTALL_FLAG_BYTES = 50 * 1024 * 1024
+
+
+def _tree_exceeds(root, limit):
+    total = 0
+    stack = [str(root)]
+    while stack:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+                    if total > limit:
+                        return True
+            except OSError:
+                continue
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _no_agent_environment_installed_into_tmp_path(request):
+    yield
+    tmp = request.node.funcargs.get("tmp_path") if hasattr(request.node, "funcargs") else None
+    if tmp is None:
+        return
+    tmp_root = pathlib.Path(tmp).resolve()
+    hits = [
+        str(p)
+        for pattern in _AGENT_INSTALL_GLOBS
+        for p in pathlib.Path(tmp).glob(pattern)
+        # Only trees that physically live under tmp_path: a test that symlinks an
+        # installs/ or environments/ dir at the real ~/.hermes must not be flagged.
+        if p.resolve().is_relative_to(tmp_root) and _tree_exceeds(p, _AGENT_INSTALL_FLAG_BYTES)
+    ]
+    if hits:
+        pytest.fail(
+            "a subprocess installed a Hermes Agent environment into this test's tmp_path "
+            f"({hits[0]}); pass HERMES_DISABLE_LAZY_INSTALLS=1 in the subprocess env",
+            pytrace=False,
+        )
+
+
 @pytest.fixture(autouse=True)
 def _reset_password_hash_cache():
     """Reset the memoized password-hash cache around every test (#5588).
@@ -229,6 +293,44 @@ def _reset_password_hash_cache():
     yield
     if _invalidate_password_hash_cache:
         _invalidate_password_hash_cache()
+
+
+def _strip_leaked_webui_password_env() -> None:
+    """Remove a leaked HERMES_WEBUI_PASSWORD between tests (#7168 review).
+
+    bootstrap.py runs _load_repo_dotenv() at import time, which copies values
+    from the developer's real repo .env straight into os.environ. When any
+    test imports bootstrap mid-session (e.g. tests/test_bootstrap_foreground.py
+    via its import_bootstrap fixture), a local .env containing
+    HERMES_WEBUI_PASSWORD leaks into the process environment OUTSIDE
+    monkeypatch's undo scope. Every later test then sees is_auth_enabled()
+    True and no-handler cookie helpers raise spurious
+    "build_profile_cookie requires a request handler" errors — exactly the
+    #5588 failure shape, but sourced from the repo .env instead of the hash
+    cache. Tests that legitimately enable auth set the var themselves AFTER
+    this strip; an intentionally-empty value ("") is preserved so
+    ctl.sh-style override semantics keep working.
+
+    HERMES_COMMAND gets the same treatment (#7168 re-gate round 7): a local
+    .env carrying HERMES_COMMAND leaks past bootstrap imports and redirects
+    gateway_restart._resolve_hermes_command() away from its mocked
+    shutil.which result, failing every later active-profile-restart test
+    with a machine-specific CLI path. Upstream code has no
+    HERMES_COMMAND override, so stripping a leaked value restores exact
+    upstream semantics.
+    """
+    if os.environ.get("HERMES_WEBUI_PASSWORD") == "":
+        pass  # intentional empty override preserved for the password var
+    else:
+        os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+    os.environ.pop("HERMES_COMMAND", None)
+
+
+@pytest.fixture(autouse=True)
+def _strip_leaked_webui_password():
+    _strip_leaked_webui_password_env()
+    yield
+    _strip_leaked_webui_password_env()
 
 
 @pytest.fixture(autouse=True)

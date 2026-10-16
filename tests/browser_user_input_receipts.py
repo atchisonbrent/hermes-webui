@@ -114,13 +114,16 @@ def main():
                                     page.screenshot(path=str(Path(screenshots)/f'live-input-{mode}-{engine}-{width}.png'))
                                 growth=page.evaluate("""async mode=>{
                                   const source=LIVE_STREAMS.fixture.source;
-                                  const receiptNodes=Array.from(document.querySelectorAll('.user-input-receipt'));
+                                  const receiptContent=()=>Array.from(document.querySelectorAll('.user-input-receipt'))
+                                    .map(n=>[n.dataset.userInputId,n.textContent]).sort((a,b)=>a[0].localeCompare(b[0]));
+                                  const beforeReceipts=JSON.stringify(receiptContent());
                                   for(let i=0;i<20;i++){
                                     source.emit('tool',{name:'terminal',tid:'growth-'+i,args:{command:'printf progress'},timestamp:20+i*3});
                                     source.emit('tool_complete',{name:'terminal',tid:'growth-'+i,result:'ok',timestamp:21+i*3});
                                     source.emit('interim_assistant',{text:'Later progress '+i+' '+('Continuing work. '.repeat(30)),timestamp:22+i*3,event_id:'run-fixture:'+(1010+i*3)});
                                   }
-                                  if(mode!=='hide_all_activity'&&receiptNodes.some(n=>!n.isConnected))throw new Error('streaming rebuilt receipt DOM');
+                                  // Native rendering may rebuild nodes, but must preserve recorded inputs.
+                                  if(JSON.stringify(receiptContent())!==beforeReceipts)throw new Error('streaming changed recorded input');
                                   if(mode==='hide_all_activity'){
                                     source.emit('token',{text:'Visible answer continues. '.repeat(500)});
                                     await new Promise(r=>setTimeout(r,150));

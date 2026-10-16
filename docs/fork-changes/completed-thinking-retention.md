@@ -1,5 +1,11 @@
 # Retain unchanged completed thinking rows
 
+**Historical, superseded by upstream-first v0.52.458 reconciliation.** The
+retained-node presentation contract and its dedicated browser test were retired.
+The notes below describe the former fork, not a current requirement or porting
+instruction. Current rendering follows upstream; see
+`stable-052458-reconciliation.md` and `tests/browser_upstream_worklog.py`.
+
 Classification: upstream-candidate. Upstream status: not-filed.
 Upstream base: nesquena/hermes-webui master, be5c07175049fc32e093231a8d7fc4b7127c0f0e; fork integration base 02c390e6313d232539ac8e01c93bd11c8df7cb23.
 Maintenance owner: fork maintainer. Private details removed: yes.

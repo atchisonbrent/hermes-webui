@@ -466,18 +466,7 @@ global._decorateTransparentEventRow=(row,opts)=>{
 global._rehydrateTransparentLiveRow=()=>{};
 global._sanitizeThinkingDisplayText=value=>String(value||'').trim();
 global._firstValidTimestampSeconds=()=>null;
-// This fake DOM does not parse innerHTML. Supply only the disclosure shell;
-// exercise the production compact grouping and row renderer below.
 document.documentElement={lang:'en'};
-global._syncCompactUpdateSummary=()=>{};
-global._compactUpdateShell=(key,previous)=>{
-  if(previous)return previous;
-  const shell=new FakeElement('details');shell.className='compact-ai-update';
-  shell.dataset.compactUpdateKey=key;
-  const prose=new FakeElement('div');prose.className='compact-ai-update-prose';shell.appendChild(prose);
-  const body=new FakeElement('div');body.className='compact-ai-update-body';shell.appendChild(body);
-  return shell;
-};
 
 eval(anchorsSrc);
 for(const name of [
@@ -491,7 +480,7 @@ for(const name of [
   '_thinkingMarkup','_renderThinkingInto',
   '_resetMismatchedLiveAssistantTurnForSession',
   '_liveAnchorReasoningRowForFallback','_updateLiveAnchorReasoningRowForFallback',
-  '_anchorSceneNodeForRow','_anchorSceneWorklogGroup','_placeCompactUpdateChildren','_renderCompactUpdateRows','_renderAnchorSceneRowsIntoWorklog',
+  '_anchorSceneNodeForRow','_anchorSceneWorklogGroup','_renderAnchorSceneRowsIntoWorklog',
   'isLiveAnchorActivitySceneOwner','_projectLiveAnchorActivitySceneForStream',
   '_restoreLiveAnchorScrollSnapshotAfterRebuild',
   '_renderLiveAnchorActivitySceneTransparent','renderLiveAnchorActivityScene',

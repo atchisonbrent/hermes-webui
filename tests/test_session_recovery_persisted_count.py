@@ -43,16 +43,21 @@ def test_recovery_detects_persisted_growth_despite_stale_cached_count(monkeypatc
     assert bp.should_emit_session_updated(1, count)
 
 
-def test_recovery_reads_legacy_sidecar_and_replacement():
+def test_recovery_rejects_legacy_count_until_vouched_replacement():
     sid = "recovery-legacy-count"
     path = models.SESSION_DIR / f"{sid}.json"
     data = {"session_id": sid, "title": "Legacy", "created_at": 1, "updated_at": 2,
             "messages": [{"role": "user", "content": "first"}]}
     path.write_text(json.dumps(data))
-    assert bp.persisted_message_count_for_session(sid) == 1
-    assert bp.persisted_message_count_for_session(sid) == 1
-    data["messages"].append({"role": "assistant", "content": "second"})
-    path.write_text(json.dumps(data))
+    # The reconnect probe must not parse full legacy transcripts or trust an
+    # unmarked count. Normal session loading still preserves the legacy rows.
+    assert bp.persisted_message_count_for_session(sid) is None
+    assert bp.persisted_message_count_for_session(sid) is None
+    loaded = models.Session.load(sid)
+    assert loaded is not None
+    assert loaded.messages == data["messages"]
+    loaded.messages.append({"role": "assistant", "content": "second"})
+    loaded.save(skip_index=True)
     assert bp.persisted_message_count_for_session(sid) == 2
 
 

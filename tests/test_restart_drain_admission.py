@@ -12,6 +12,34 @@ def _clear_run(config, stream_id: str) -> None:
         config.ACTIVE_RUNS.pop(stream_id, None)
 
 
+def test_health_exposes_drain_identity_and_pending_work(monkeypatch, tmp_path):
+    from api import config, routes
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+    monkeypatch.setattr(config, 'DEFERRED_PROCESS_WAKEUPS', {'private-session': [{}, {}]})
+    monkeypatch.setattr(config, 'PENDING_BG_TASK_COMPLETIONS', {'private-session'})
+    monkeypatch.setattr(routes, '_DEFERRED_WAKEUP_RETRY_TIMERS', {'private-session': object()})
+    payload = routes._run_lifecycle_health()
+    assert payload['pid'] == os.getpid()
+    assert payload['restart_draining'] is False
+    assert payload['pending_wakeups']['deferred_entries'] == 2
+    assert payload['pending_wakeups']['retry_records'] == 1
+    assert payload['pending_wakeups']['completion_markers'] == 1
+    assert 'private-session' not in json.dumps(payload)
+
+
+def test_generation_bound_marker_and_startup_cleanup(monkeypatch, tmp_path):
+    from api import config
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+    marker = tmp_path / f'{os.getpid()}.json'
+    marker.write_text(json.dumps({'server_started_at': config.SERVER_START_TIME - 1}))
+    assert config.restart_drain_active() is False
+    marker.write_text(json.dumps({'server_started_at': config.SERVER_START_TIME}))
+    assert config.restart_drain_active() is True
+    config.clear_startup_restart_drain()
+    assert not marker.exists()
+    assert config.restart_drain_active() is False
+
+
 def test_current_process_drain_marker_refuses_new_run(monkeypatch, tmp_path):
     from api import config
 
@@ -25,6 +53,25 @@ def test_current_process_drain_marker_refuses_new_run(monkeypatch, tmp_path):
 
     with config.ACTIVE_RUNS_LOCK:
         assert stream_id not in config.ACTIVE_RUNS
+
+
+@pytest.mark.parametrize('lock_held', [False, True])
+def test_drain_refuses_new_launch_claim(monkeypatch, tmp_path, lock_held):
+    from api import config
+
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+    (tmp_path / f'{os.getpid()}.json').write_text('{}\n')
+    stream_id = 'drain-new-claim'
+    try:
+        with pytest.raises(config.RunAdmissionDrainingError):
+            if lock_held:
+                with config.STREAMS_LOCK:
+                    config.publish_pre_admission_claim(stream_id, streams_lock_held=True)
+            else:
+                config.publish_pre_admission_claim(stream_id)
+        assert stream_id not in config.PRE_ADMISSION_CLAIMS
+    finally:
+        config.retire_pre_admission_claim_if_owned(stream_id)
 
 
 def test_other_process_drain_marker_does_not_refuse_run(monkeypatch, tmp_path):
@@ -78,6 +125,19 @@ def test_chat_start_returns_retryable_maintenance_before_session_mutation(monkey
     assert observed["status"] == 503
     assert observed["payload"]["status"] == "restart_draining"
     assert observed["payload"]["retryable"] is True
+
+
+def test_server_wakeup_refuses_drain_before_session_mutation(monkeypatch, tmp_path):
+    from api import routes
+
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+    (tmp_path / f'{os.getpid()}.json').write_text('{}\n')
+    monkeypatch.setattr(routes, '_agent_runtime_barrier_response', lambda **kwargs: None)
+    monkeypatch.setattr(routes, 'get_session', lambda *_: pytest.fail('draining wakeup reached session mutation'))
+    result = routes.start_session_turn('session-wakeup', 'completion')
+    assert result['_status'] == 503
+    assert result['status'] == 'restart_draining'
+    assert result['retryable'] is True
 
 
 def test_local_worker_race_emits_terminal_retryable_event(monkeypatch, tmp_path):

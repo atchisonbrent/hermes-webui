@@ -200,7 +200,11 @@ def test_pinned_preserve_scroll_uses_bottom_distance_before_viewport_anchor():
     same_frame = _function_body(UI_JS, "function _restoreMessageScrollSnapshotSameFrame")
 
     assert "snapshot.pinned!==true||snapshot.userUnpinned===true" in helper
-    assert "maxTop-Math.max(0,bottom)" in helper
+    # Bounce fix (Sep 6 2026): pinned restore targets the POST-rebuild tail
+    # (maxTop) exactly — the pre-rebuild `bottom` gap is stale after the
+    # rebuild grew content, and restoring to maxTop-bottom raced the follow
+    # writer's bottom snap across paint frames (visible bounce mid-stream).
+    assert "const target=maxTop;" in helper
     assert "_messageUserUnpinned=false;" in helper
     assert "_scrollPinned=true;" in helper
     assert "_nearBottomCount=2;" in helper
@@ -231,7 +235,9 @@ def test_same_session_reload_anchor_uses_absolute_session_message_index():
 
 def test_refresh_session_updates_message_window_offset_before_rerender():
     refresh = _function_body(UI_JS, "function refreshSession")
-    messages_idx = refresh.index("S.messages = data.session.messages || [];")
+    messages_idx = refresh.index("S.messages = typeof _reconcileRunningMessageWindow")
+    assert "_reconcileRunningMessageWindow(data.session,data.session.messages || [])" in refresh
+    assert ": (data.session.messages || []);" in refresh
     truncated_idx = refresh.index("_messagesTruncated = !!data.session._messages_truncated;")
     offset_idx = refresh.index("_oldestIdx = data.session._messages_offset || 0;")
     render_idx = refresh.index("_renderMessagesWithScrollSnapshot();")

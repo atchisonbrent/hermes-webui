@@ -35,6 +35,13 @@ def test_endpoints_record_only_accepted_inputs_and_report_write_failure(tmp_path
     agent=SimpleNamespace(session_id='session',steer=lambda text:(calls.append(text) or True))
     monkeypatch.setattr(config,'SESSION_AGENT_CACHE',{'session':(agent,'signature')})
     monkeypatch.setattr(config,'STREAMS',{'run':object()})
+    active = {'run': {'session_id': 'session', 'backend': 'legacy', 'phase': 'running'}}
+    owners = {'run': 'session'}
+    for module in (config, streaming):
+        if hasattr(module, 'ACTIVE_RUNS'):
+            monkeypatch.setattr(module, 'ACTIVE_RUNS', active)
+        if hasattr(module, 'STREAM_SESSION_OWNERS'):
+            monkeypatch.setattr(module, 'STREAM_SESSION_OWNERS', owners)
     monkeypatch.setattr(streaming,'get_session',lambda sid:session)
     handler=_make_handler()
     streaming._handle_chat_steer(handler,{'session_id':'session','text':'raw transport','display_text':'visible steer'})
@@ -114,6 +121,13 @@ def test_accepted_response_redacts_receipt_without_changing_agent_input(tmp_path
     agent=SimpleNamespace(session_id='session',steer=lambda text:(accepted.append(text) or True))
     monkeypatch.setattr(config,'SESSION_AGENT_CACHE',{'session':(agent,'signature')})
     monkeypatch.setattr(config,'STREAMS',{'run':object()})
+    active = {'run': {'session_id': 'session', 'backend': 'legacy', 'phase': 'running'}}
+    owners = {'run': 'session'}
+    for module in (config, streaming):
+        if hasattr(module, 'ACTIVE_RUNS'):
+            monkeypatch.setattr(module, 'ACTIVE_RUNS', active)
+        if hasattr(module, 'STREAM_SESSION_OWNERS'):
+            monkeypatch.setattr(module, 'STREAM_SESSION_OWNERS', owners)
     monkeypatch.setattr(streaming,'get_session',lambda sid:session)
     monkeypatch.setattr(routes,'get_session',lambda sid,**kwargs:session)
     monkeypatch.setattr(runtime_adapter,'runtime_adapter_enabled',lambda:False)

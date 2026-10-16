@@ -68,6 +68,11 @@ function _recentMessageKeyScrollIntent() {{ return false; }}
 function _messageBottomDistance() {{ return messages.scrollHeight - messages.scrollTop - messages.clientHeight; }}
 function _setMessageScrollToBottom() {{ writes += 1; }}
 function _settleMessageScrollToBottom() {{ writes += 1; }}
+// #7494: the inlined handler consults the targeting gate; this harness has no
+// layout engine and the target is the transcript scroller itself.
+const getComputedStyle = () => ({{ overflowY: 'visible' }});
+const _isTranscriptScrollTarget = () => true;
+const _captureMessageScrollInputTail = () => {{}};
 {_function_body('_freshProgrammaticScrollActive')}
 {_function_body('_recordNonMessageScrollIntent')}
 {_function_body('scrollIfPinned')}
@@ -181,6 +186,8 @@ function _restoreMessageViewportAnchor() {{ return false; }}
 function _messageVirtualPrependedHeightDelta() {{ return null; }}
 function requestAnimationFrame() {{ return 0; }}
 {_function_body('_freshProgrammaticScrollActive')}
+{_function_body('_adoptUserInputReceipts')}
+{_function_body('_reconcileRunningMessageWindow', SESSIONS_JS)}
 {_function_body('_loadOlderMessages', SESSIONS_JS)}
 
 await _loadOlderMessages();

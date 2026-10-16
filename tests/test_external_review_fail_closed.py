@@ -319,7 +319,7 @@ def test_native_file_view_does_not_persist_workspace_recovery(monkeypatch):
     session = SimpleNamespace(session_id='claude_code_legacy', workspace='/missing', profile=None)
     monkeypatch.setattr(models, 'get_session', lambda *a, **kw: session)
     monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: None)
-    monkeypatch.setattr(workspace, 'resolve_implicit_workspace_with_recovery', lambda *a: ('/recovered', True))
+    monkeypatch.setattr(workspace, 'resolve_implicit_workspace_with_recovery', lambda *a, profile=None: ('/recovered', True))
     def forbidden(*a, **kw):
         raise AssertionError('native read must not rewrite workspace')
     monkeypatch.setattr(models, 'persist_recovered_workspace_binding', forbidden)

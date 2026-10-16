@@ -136,7 +136,7 @@ def main():
                                     content_steer=kind=='steer' and os.environ.get('CONTENT_STEER')=='1'
                                     assert projected==((2 if content_steer else 3) if enabled else 0), 'Real GET failed to apply commentary policy'
                                     for text in UPDATES+['Verification is complete.']:
-                                        selector='.compact-ai-update-prose' if mode=='compact_worklog' else '[data-anchor-row-role=prose]'
+                                        selector='[data-anchor-row-role=prose]'
                                         prose=group.locator(selector).filter(has_text=text)
                                         if (not enabled and not (content_steer and text==UPDATES[0])) or mode=='hide_all_activity':
                                             assert prose.count()==0, 'Hidden commentary recovered'
@@ -144,14 +144,13 @@ def main():
                                         assert prose.count()==1, (kind,stage,text,'missing or duplicated')
                                         assert prose.is_visible(), (kind,stage,text,'not visible')
                                         if mode=='compact_worklog' and text in UPDATES and os.environ.get('NO_REASONING')!='1' and not (content_steer and text==UPDATES[0]):
-                                            update=prose.locator('..')
-                                            thought=update.locator('.agent-activity-thinking')
-                                            assert thought.count()==1, 'Thinking detached from update'
+                                            thought=group.locator('.agent-activity-thinking').filter(has_text=f'Thought {UPDATES.index(text)}.')
+                                            assert thought.count()==1, 'Recorded thinking missing or duplicated'
                                             assert f'Thought {UPDATES.index(text)}.' in thought.text_content()
-                                            assert update.locator('.tool-card-row').count()==1, 'Tool detached from update'
+                                            assert group.locator('.tool-card-row').count()==2, 'Recorded tools missing or duplicated'
                                     if enabled and mode=='compact_worklog':
                                         for text in UPDATES:
-                                            assert page.locator('#msgInner .compact-ai-update-prose').filter(has_text=text).count()==1, 'Cross-block duplicate commentary'
+                                            assert page.locator('#msgInner [data-anchor-row-role=prose]').filter(has_text=text).count()==1, 'Cross-block duplicate commentary'
                                     if content_steer and mode in ('compact_worklog','transparent_stream'):
                                         assert page.locator('#msgInner').inner_text().count(UPDATES[0])==1, 'Pre-steer public text displayed twice'
                                     if mode=='compact_worklog':

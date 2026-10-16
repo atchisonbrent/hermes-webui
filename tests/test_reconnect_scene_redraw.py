@@ -11,15 +11,29 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+NODE = shutil.which('node')
+pytestmark = pytest.mark.skipif(NODE is None, reason='Node.js is required for the reconnect replay probe')
+
+
+def source_slice(text, start_marker, end_marker, path):
+    start = text.find(start_marker)
+    assert start >= 0, f'{path}: missing start marker {start_marker!r}'
+    end = text.find(end_marker, start)
+    assert end >= 0, f'{path}: missing end marker {end_marker!r}'
+    return text[start:end]
 
 
 def replay_probe(restored_scene, count, skip_unkeyed=True, has_rows=True):
     sessions = (ROOT / 'static/sessions.js').read_text()
     ui = (ROOT / 'static/ui.js').read_text()
-    start = sessions.index('const liveToolReplayId=(tc)=>')
-    replay = sessions[start:sessions.index('    let didReconnect=false;', start)]
-    start = ui.index('function appendLiveToolCard(')
-    append = ui[start:ui.index('\nfunction _findLatestLiveAssistantByBurst', start)]
+    replay = source_slice(
+        sessions, 'const liveToolReplayId=(tc)=>', '    let didReconnect=false;',
+        'static/sessions.js',
+    )
+    append = source_slice(
+        ui, 'function appendLiveToolCard(', '\nfunction _findLatestLiveAssistantByBurst',
+        'static/ui.js',
+    )
     script = r"""
 const vm=require('node:vm');
 const opts=JSON.parse(process.argv[1]);
@@ -43,7 +57,7 @@ vm.runInContext(REPLAY+'\nreplayPersistedLiveToolCards('+JSON.stringify({skipUnk
 console.log(JSON.stringify({redraws,appended,tools:tools.length}));
 """.replace('APPEND', json.dumps(append)).replace('REPLAY', json.dumps(replay))
     result = subprocess.run(
-        [shutil.which('node') or 'node', '-e', script, json.dumps({
+        [NODE or 'node', '-e', script, json.dumps({
             'restored_scene': restored_scene, 'count': count,
             'skip_unkeyed': skip_unkeyed, 'has_rows': has_rows,
         })], capture_output=True, text=True, check=True,
@@ -58,7 +72,7 @@ def test_restored_complete_scene_is_not_redrawn_per_saved_tool(count):
     assert result['tools'] == count + 1  # No stored activity was dropped.
 
 
-def test_legacy_restored_html_still_replays_keyed_tools():
+def test_non_anchor_restore_still_replays_keyed_tools():
     result = replay_probe(False, 3)
     assert result['appended'] == ['tool-0', 'tool-1', 'tool-2']
 

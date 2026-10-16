@@ -1,8 +1,8 @@
 # Commentary in settled history
 
 Intermediate assistant replies are conversation prose, not reasoning. Compact
-**Processed** groups display them above their associated thinking/tool disclosure;
-the final answer remains outside. Transparent Stream displays the same public
+**Processed** groups use upstream's prose/thinking/tool rows, without fork-only
+nested update disclosures; the final answer remains outside. Transparent Stream displays the same public
 commentary inline. Final-answer-only mode continues to hide activity.
 
 The session GET and completion payloads use the agent's optional
@@ -33,13 +33,15 @@ this repair prefers retaining that trace over guessing which text to delete.
 ## Verification
 
 - `./scripts/test.sh tests/test_history_commentary_projection.py tests/test_history_commentary_render.py tests/test_anchor_scene_persistence.py`
-- `LEGACY=1 COMMENTARY=1 .venv/bin/python tests/browser_compact_update_hierarchy.py`
+- `.venv/bin/python tests/browser_upstream_worklog.py` verifies native controls,
+  final-answer visibility, tool rows and a recorded steer across reloads.
 - `HERMES_WEBUI_AGENT_DIR=/path/to/qualified/hermes-agent .venv/bin/python tests/browser_history_commentary.py`
 - Repeat the real-API browser test with `COMMENTARY_DISABLED=1 KINDS=legacy,scene`
   for the new-projection policy negative control. `saved`/`steer` fixtures also
   contain pre-existing public scene prose, which that setting does not retract.
-- `COMMENTARY=1 .venv/bin/python tests/browser_compact_update_live.py` exercises
-  the stream entrypoint through done/rerender/reload using deterministic events.
+- `.venv/bin/python tests/browser_user_input_receipts.py` exercises the stream
+  entrypoint through done/rerender/reload using deterministic events. Native DOM
+  rebuilding is allowed; recorded identities/content, ordering and isolation are not relaxed.
 - `ACTIVITY_MODE=hide_all_activity COMMENTARY_ONLY=1 KINDS=legacy` checks that
   commentary-only messages create no empty worklog in final-answer-only mode.
   All browser fixtures use isolated temporary state, not the operator's sessions.
@@ -58,8 +60,8 @@ Mixed reasoning carriers, previously saved unstripped thinking rows, and scenes
 without tools or thinking retain legacy rendering limitations. This change targets
 intermediate public updates in compact history, not a redesign of scene ownership
 or all activity modes. Browser fixtures are explicit scripts, not pytest-collected.
-Use `STEER=1 COMMENTARY=1` for the live fixture and `CONTENT_STEER=1 KINDS=steer`
-for the real-API fixture (also with `COMMENTARY_DISABLED=1`) to cover steering.
+Use `CONTENT_STEER=1 KINDS=steer` for the real-API fixture (also with
+`COMMENTARY_DISABLED=1`) to cover persisted steering.
 Full-transcript settlement projection now deep-copies nested payloads for isolation;
 large tool-result transcripts can cost more than windowed GETs. Earlier shallow-copy
 microbenchmarks do not certify this bound. Steering fixtures exercise persisted

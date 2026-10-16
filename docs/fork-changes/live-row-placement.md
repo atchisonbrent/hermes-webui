@@ -1,5 +1,11 @@
 # Stable live row placement
 
+**Historical, superseded by upstream-first v0.52.458 reconciliation.** The
+custom placement/selection-retention contract and its dedicated browser test
+were retired. The notes below are historical, not current porting instructions.
+Current rendering follows upstream; see `stable-052458-reconciliation.md` and
+`tests/browser_upstream_worklog.py`.
+
 Classification: upstream-candidate
 Base: fork combined release `02c390e6313d232539ac8e01c93bd11c8df7cb23`, including upstream `be5c07175049fc32e093231a8d7fc4b7127c0f0e`.
 Maintenance owner: fork maintainers.
