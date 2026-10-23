@@ -23273,6 +23273,8 @@ def _handle_live_models(handler, parsed):
             _set_cached_live_models(cache_key, payload)
             return j(handler, payload)
 
+        from api.config import _configured_live_provider_record
+        configured_catalog = _configured_live_provider_record(provider, cfg) is not None
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
         # the static _PROVIDER_MODELS list — it never raises.
@@ -23285,11 +23287,18 @@ def _handle_live_models(handler, parsed):
             if _agent_dir not in _sys.path:
                 _sys.path.insert(0, _agent_dir)
             from hermes_cli.models import provider_model_ids as _pmi
-            ids = _pmi(provider)
+            if configured_catalog:
+                from api.config import _read_live_provider_model_ids
+                ids = _read_live_provider_model_ids(provider)
+            else:
+                ids = _pmi(provider)
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
 
+        if configured_catalog and not ids:
+            # A configured route never falls through to another authority.
+            return _finish({"provider": provider, "models": [], "count": 0})
         if not ids:
             custom_provider_entry = None
 
@@ -23669,6 +23678,10 @@ def _handle_live_models(handler, parsed):
             if not mid:
                 continue
             entry = {"id": mid, "label": _make_label(mid)}
+            if configured_catalog and not mid.startswith("@"):
+                # Live enrichment must retain the serving route even for
+                # vendor/model IDs absent from local per-model settings.
+                entry["id"] = f"@{provider}:{mid}"
             if annotate_fast_tier:
                 entry["supports_fast_tier"] = _model_supports_fast_tier_for_provider(mid, provider)
             models_out.append(entry)
