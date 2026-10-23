@@ -2467,16 +2467,19 @@ def _apply_provider_prefix(
     """Return *raw_models* with @provider: prefixes applied when needed.
 
     Prefixing is skipped when (a) the provider is already the active one, or
-    (b) a model id already starts with '@' or contains '/' (already routable).
+    (b) a model id already starts with '@'. Slash IDs keep legacy behavior
+    except on explicitly configured live endpoints: vendor/model is not the
+    serving provider's routing identity.
     """
     _active = (active_provider or "").lower()
     if not _active or provider_id == _active:
         return list(raw_models)
+    configured_catalog = _configured_live_provider_record(provider_id, cfg) is not None
     result = []
     for m in raw_models:
         mid = m["id"]
         entry = dict(m)
-        if mid.startswith("@") or "/" in mid:
+        if mid.startswith("@") or ("/" in mid and not configured_catalog):
             result.append(entry)
         else:
             entry["id"] = f"@{provider_id}:{mid}"
@@ -5545,6 +5548,12 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     return []
 
 
+def _catalog_reasoning_provider_cfg(provider_id: str) -> dict:
+    """Use the selected live route's metadata without changing legacy config lookup."""
+    record = _configured_live_provider_record(provider_id, cfg)
+    return _get_provider_cfg(provider_id) if record is None else record
+
+
 def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] | None:
     """Return reasoning efforts from Hermes Agent model metadata when known.
 
@@ -5557,19 +5566,24 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     if not model or not provider:
         return None
 
+    catalog_provider = str(_catalog_reasoning_provider_cfg(provider).get("catalog_provider") or "").strip()
     try:
         from agent.models_dev import get_model_capabilities
     except Exception:
-        return None
+        return [] if catalog_provider else None
 
     try:
-        capabilities = get_model_capabilities(provider=provider, model=model)
+        capabilities = get_model_capabilities(provider=catalog_provider or provider, model=model)
     except Exception:
-        return None
+        return [] if catalog_provider else None
     if capabilities is None:
-        return None
+        return [] if catalog_provider else None
 
     supports_reasoning = getattr(capabilities, "supports_reasoning", None)
+    efforts = getattr(capabilities, "reasoning_efforts", None)
+    if catalog_provider and hasattr(capabilities, "reasoning_efforts"):
+        # A boolean or absent schema does not advertise a graded wire control.
+        return _filter_reasoning_efforts_for_provider(list(efforts or ()), model, provider)
     if supports_reasoning is True:
         return _filter_reasoning_efforts_for_provider(
             list(VALID_REASONING_EFFORTS), model, provider
@@ -5860,7 +5874,10 @@ def _resolve_model_reasoning_efforts_impl(
     # empty model metadata falls through to the provider list, then heuristics.
     _re_lists = []
     try:
-        if provider and provider.startswith("custom:"):
+        _live_record = _configured_live_provider_record(provider, cfg)
+        if _live_record is not None:
+            _re_lists = _configured_reasoning_effort_lists(_live_record, hinted_model)
+        elif provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
@@ -6015,6 +6032,8 @@ def coerce_reasoning_effort_for_model(
     # verbatim, which Z.AI would silently ignore. This keeps the value actually
     # sent in agreement with the UI (which offers no options for these models).
     if not supported:
+        if _catalog_reasoning_provider_cfg(str(provider_id or "")).get("catalog_provider"):
+            return ""
         if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
             return ""
         if raw == "max" and not _provider_known_reasoning_capable(provider_id):
@@ -7548,6 +7567,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                         for key in ("api_key", "key_env", "base_url")
                     )
                     provider_models = provider_cfg.get("models")
+                    if _configured_live_provider_record(canonical, cfg) is not None:
+                        provider_models = None
+                        has_local_signal = True
                     for model_id in _configured_model_ids(provider_models):
                         _append_model_id(canonical, model_id)
                         has_local_signal = True
@@ -7671,14 +7693,17 @@ def _static_models_catalog_without_live_probes() -> dict:
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
             provider_cfg = _get_provider_cfg(raw_key)
+            provider_name = str(provider_cfg.get("name") or "").strip() or provider_name
+            configured_live_authority = _configured_live_provider_record(pid, cfg) is not None
             raw_models = []
             if (
                 isinstance(provider_cfg, dict)
                 and "models" in provider_cfg
                 and not _provider_models_are_discovered_catalog(provider_cfg)
+                and not configured_live_authority
             ):
                 raw_models = _configured_model_options(provider_cfg.get("models"))
-            if not raw_models:
+            if not raw_models and not configured_live_authority:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
             # Plugin-only providers (e.g. 9router) are not in _PROVIDER_MODELS
             # and rarely ship a `models:` allowlist in providers.<slug>, so
@@ -9327,6 +9352,23 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     )
 
 
+def _configured_live_provider_record(provider_id: str, config_data: dict) -> dict | None:
+    """Resolve an explicitly enabled named catalog through existing authority rules."""
+    slug = _canonicalise_provider_id(provider_id).removeprefix("custom:")
+    if slug in _PROVIDER_MODELS or slug in _PROVIDER_DISPLAY or _is_plugin_model_provider(slug):
+        return None
+    try:
+        record, _, _, _ = _select_custom_provider_record(f"custom:{slug}", slug, config_data)
+    except AmbiguousCustomProviderError:
+        # An ambiguous route is authoritative but unavailable: suppress its
+        # fallbacks without taking unrelated providers out of the picker.
+        return {}
+    if (record and record.get("base_url") and "discover_models" in record
+            and _provider_discover_allowed(record)):
+        return record
+    return None
+
+
 def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     """Return live model IDs from Hermes CLI for a provider, or [] on failure.
 
@@ -9340,6 +9382,35 @@ def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     pid = str(provider_id or "").strip()
     if not pid:
         return []
+    provider_cfg = _configured_live_provider_record(pid, get_config())
+    if provider_cfg is not None:
+        # A configured endpoint is authoritative, including on failure. Reuse
+        # the route bundle and Agent's credential/header-scoped catalog cache;
+        # never try a native provider with the same name after this probe fails.
+        try:
+            from hermes_cli.models import cached_fetch_api_models
+            bundle = resolve_custom_provider_bundle(f"custom:{pid.removeprefix('custom:')}")
+            if not bundle or not bundle.get("endpoint_owned"):
+                return []
+            if not bundle.get("api_key") and not bundle.get("keyless"):
+                return []
+            owned = bundle.get("owned") or {}
+            headers = _expand_env_vars((bundle.get("record") or {}).get("extra_headers"))
+            kwargs = {
+                "headers": headers if isinstance(headers, dict) else None,
+                "api_mode": owned.get("api_mode"),
+            }
+            ids = cached_fetch_api_models(
+                bundle.get("api_key"), bundle.get("base_url"), force_refresh=True, **kwargs,
+            )
+            if ids is None:
+                ids = cached_fetch_api_models(
+                    bundle.get("api_key"), bundle.get("base_url"), cache_only=True, **kwargs,
+                )
+            return list(dict.fromkeys(mid.strip() for mid in (ids or []) if isinstance(mid, str) and mid.strip()))
+        except Exception:
+            logger.debug("Configured catalog unavailable for %s", pid)
+            return []
     try:
         from hermes_cli.models import provider_model_ids as _provider_model_ids
     except Exception:
@@ -11027,6 +11098,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # that appear in _PROVIDER_MODELS but not in cfg.
                     _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
                     provider_cfg = _get_provider_cfg(_raw_key)
+                    provider_name = str(provider_cfg.get("name") or "").strip() or provider_name
+                    _configured_live_authority = _configured_live_provider_record(pid, cfg) is not None
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
@@ -11041,6 +11114,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # live catalog first (static _PROVIDER_MODELS is fallback only).
                     _uses_models_as_settings_map = (
                         pid == "copilot"
+                        or _configured_live_authority
                         or _provider_models_are_discovered_catalog(provider_cfg)
                     )
                     if (
@@ -11069,6 +11143,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             if (
                                 not raw_models
                                 and _provider_models_are_discovered_catalog(provider_cfg)
+                                and not _configured_live_authority
                             ):
                                 # A transient live-catalog failure must not drop a
                                 # provider's persisted discovered models (the empty
@@ -11080,11 +11155,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                     copy.deepcopy(_PROVIDER_MODELS.get(pid, [])),
                                 )
 
-                    if not raw_models:
+                    if not raw_models and not _configured_live_authority:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
 
                     detected_models = auto_detected_models_by_provider.get(pid, [])
-                    if detected_models and not raw_models:
+                    if detected_models and not raw_models and not _configured_live_authority:
                         raw_models = copy.deepcopy(detected_models)
                     _append_picker_group(provider_name, pid, raw_models)
                 else:
@@ -11188,14 +11263,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 }
                 if _norm_model_id(default_model) not in existing_ids_norm:
                     label = _get_label_for_model(default_model, groups)
-                    target_display = (
-                        _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
-                        if active_provider
-                        else ""
-                    )
                     injected = False
                     for g in groups:
-                        if target_display and g.get("provider", "").lower() == target_display:
+                        if active_provider and g.get("provider_id") == active_provider:
                             g["models"].insert(0, {"id": default_model, "label": label})
                             injected = True
                             break
