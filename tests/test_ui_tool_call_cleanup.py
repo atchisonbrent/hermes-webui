@@ -544,9 +544,13 @@ class TestToolCallGroupingStatic:
         ) == reasoning, (
             "Non-exact reasoning should stay available as a Worklog Thinking Card."
         )
-        helper = _function_body(UI_JS, "_stripVisibleAssistantEchoFromThinking")
-        assert ".split(snippet).join('')" not in helper
-        assert ".includes(" not in helper
+        for helper_name in (
+            "_stripVisibleAssistantEchoFromThinking",
+            "_stripVisibleAssistantEchoFromThinkingCached",
+        ):
+            helper = _function_body(UI_JS, helper_name)
+            assert ".split(snippet).join('')" not in helper, helper_name
+            assert ".includes(" not in helper, helper_name
 
     def test_reasoning_first_interim_later_does_not_duplicate_settled_worklog(self):
         render_fn = _function_body(UI_JS, "renderMessages")
@@ -560,7 +564,7 @@ class TestToolCallGroupingStatic:
             "settlement must still compare against earlier visible process prose "
             "from the same assistant turn."
         )
-        assert "_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents)" in render_fn
+        assert "_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents, thinkingEchoCache)" in render_fn
         assert "_stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts)" in helper
         assert _run_thinking_echo_helper(
             "I am checking the 3401 review blocker.",
@@ -600,7 +604,7 @@ class TestToolCallGroupingStatic:
             "Thinking should be an explicit Worklog item, independent from Tool Cards."
         )
         render_min = re.sub(r"\s+", "", render_fn)
-        assert "thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:''" in render_min, (
+        assert "thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompareCached(thinkingText,thinkingEchoCache)}`:''" in render_min, (
             "Settled Worklog should keep normalized-content Thinking dedupe so sibling messages do not duplicate cards."
         )
         assert "thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:''" in render_min, (

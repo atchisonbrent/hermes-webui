@@ -8290,13 +8290,37 @@ function _sanitizeThinkingDisplayText(text){
 function _normalizeThinkingEchoCompare(text){
   return String(text||'').replace(/\s+/g,' ').trim();
 }
-
 function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
   const clean=_sanitizeThinkingDisplayText(thinkingText);
   const thinkingNorm=_normalizeThinkingEchoCompare(clean);
   if(!thinkingNorm) return '';
   for(const visibleText of visibleTexts){
     const visibleNorm=_normalizeThinkingEchoCompare(visibleText);
+    if(visibleNorm&&visibleNorm===thinkingNorm) return '';
+  }
+  return clean;
+}
+
+function _thinkingEchoMemoized(cache, kind, text, compute){
+  const source=String(text||'');
+  if(!cache||typeof cache.get!=='function'||typeof cache.set!=='function') return compute(source);
+  let values=cache.get(source);
+  if(!values){values={};cache.set(source,values);}
+  if(!Object.prototype.hasOwnProperty.call(values,kind)) values[kind]=compute(source);
+  return values[kind];
+}
+function _sanitizeThinkingDisplayTextCached(text, cache){
+  return _thinkingEchoMemoized(cache,'sanitized',text,_sanitizeThinkingDisplayText);
+}
+function _normalizeThinkingEchoCompareCached(text, cache){
+  return _thinkingEchoMemoized(cache,'normalized',text,_normalizeThinkingEchoCompare);
+}
+function _stripVisibleAssistantEchoFromThinkingCached(thinkingText, cache, ...visibleTexts){
+  const clean=_sanitizeThinkingDisplayTextCached(thinkingText,cache);
+  const thinkingNorm=_normalizeThinkingEchoCompareCached(clean,cache);
+  if(!thinkingNorm) return '';
+  for(const visibleText of visibleTexts){
+    const visibleNorm=_normalizeThinkingEchoCompareCached(visibleText,cache);
     if(visibleNorm&&visibleNorm===thinkingNorm) return '';
   }
   return clean;
@@ -12872,10 +12896,11 @@ function _assistantTurnVisibleContentMap(visWithIdx){
   flush();
   return out;
 }
-function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visibleContent, turnFinalVisibleContent, turnVisibleContents){
+function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visibleContent, turnFinalVisibleContent, turnVisibleContents, echoCache){
   const thinkingText=_assistantReasoningPayloadText(m);
   const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
-  return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+  if(arguments.length<7) return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+  return _stripVisibleAssistantEchoFromThinkingCached(thinkingText, echoCache, visibleContent, turnFinalVisibleContent, ...visibleTexts);
 }
 function _worklogDetailsExpandedDefault(){
   return window._worklogDetailsExpandedByDefault===true;
@@ -17404,8 +17429,31 @@ function _hashObjectInto(add, value, depth){
 
 function _messageRenderCacheSignature(){
   let hash=2166136261;
+  // Live activity-burst projection intentionally spreads references to the same
+  // reasoning string across every segment. Hash each distinct long string once
+  // per invocation, while retaining a position marker for repeated occurrences:
+  // equal values are redundant content, not redundant render structure. This
+  // preserves invalidation for value/order edits and avoids O(bursts×reasoning)
+  // character visits on marathon turns. The scoped Map is discarded with the
+  // signature, so a later change is always re-read instead of memoized stale.
+  const seenLongRenderValues=new Map();
   function add(value){
     const s=String(value==null?'':value);
+    if(s.length>=256){
+      const repeatedId=seenLongRenderValues.get(s);
+      if(repeatedId!==undefined){
+        // A typed ordinal cannot collide with another repeated value, unlike a
+        // length-only marker. 0x10000+id is outside one code unit's range, so
+        // the marker cannot be forged by a single character; the shared 32-bit
+        // hash still has the base algorithm's ordinary collision limits.
+        hash^=0x10000+repeatedId;
+        hash=Math.imul(hash,16777619)>>>0;
+        hash^=31;
+        hash=Math.imul(hash,16777619)>>>0;
+        return;
+      }
+      seenLongRenderValues.set(s,seenLongRenderValues.size+1);
+    }
     for(let i=0;i<s.length;i++){
       hash^=s.charCodeAt(i);
       hash=Math.imul(hash,16777619)>>>0;
@@ -18928,10 +18976,11 @@ function renderMessages(options){
   // cross-channel handoff summaries; otherwise the cached transcript returns
   // before those cards can be inserted.
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
-    const renderSignature=_messageRenderCacheSignature();
-    cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey){
+      const renderSignature=_messageRenderCacheSignature();
+      cachedRenderSignature=renderSignature;
+      if(cached.signature===renderSignature){
       inner.innerHTML=cached.html;
       _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
@@ -18954,6 +19003,7 @@ function renderMessages(options){
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
+      }
     }
   }
   // Mid-stream flicker fix (#3877): when a renderMessages() rebuild is reached
@@ -19292,6 +19342,10 @@ function renderMessages(options){
 
   const assistantSegments=new Map();
   const assistantThinking=new Map();
+  // Share only within this render: repeated live-burst reasoning is re-used at
+  // full length, while different prose still takes the normal echo-comparison
+  // path. Fresh state on every render prevents stale content across turns.
+  const thinkingEchoCache=new Map();
   const userRows=new Map();
   // Only collect tool-call assistant indices for messages that are actually
   // rendered in the current window.  S.toolCalls can grow large in long turns,
@@ -19447,7 +19501,7 @@ function renderMessages(options){
     if(!isUser&&(isCompactWorklogMode()||isTransparentStream())&&!thinkingText){
       const turnFinalVisibleContent=assistantTurnFinalVisibleContentByRawIdx.get(rawIdx)||'';
       const turnVisibleContents=assistantTurnVisibleContentByRawIdx.get(rawIdx)||[];
-      thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
+      thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents, thinkingEchoCache);
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     const nextRendered=renderVisWithIdx[vi+1];
@@ -20257,7 +20311,7 @@ function renderMessages(options){
           // that escapes the fold (the turn-final answer, an `_error` message)
           // had its text rendered both inline and inside the Worklog.
           includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml&&!!anchorIsWorklogSource,
-          thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
+          thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompareCached(thinkingText,thinkingEchoCache)}`:'',
           thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
           seenReasons:state.seenReasons,
           seenTools:state.seenTools,
@@ -20302,8 +20356,8 @@ function renderMessages(options){
           else blocks.appendChild(row);
         };
         if(event.thinkingText){
-          const _thinkKey=typeof _normalizeThinkingEchoCompare==='function'
-            ? _normalizeThinkingEchoCompare(event.thinkingText)
+          const _thinkKey=typeof _normalizeThinkingEchoCompareCached==='function'
+            ? _normalizeThinkingEchoCompareCached(event.thinkingText,thinkingEchoCache)
             : String(event.thinkingText).trim();
           let _seen=transparentSeenThinking.get(anchorTurn);
           if(!_seen){_seen=new Set();transparentSeenThinking.set(anchorTurn,_seen);}

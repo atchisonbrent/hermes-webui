@@ -17,6 +17,21 @@ def test_session_html_cache_uses_render_signature_not_only_count():
     assert "signature:renderSignature" in UI_JS
 
 
+def test_cold_cache_lookup_does_not_compute_expensive_signature():
+    """A cold HTML-cache miss must not pay the signature before eligibility.
+
+    The comparable-entry gate runs first. The save path still computes a
+    signature only for cache-eligible HTML (<300KB), preserving cache behavior.
+    """
+    gate = UI_JS.index("function renderMessages(")
+    restore = UI_JS.index("inner.innerHTML=cached.html;", gate)
+    body = UI_JS[gate:restore]
+    candidate = body.index("if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey){")
+    cached_lookup = body.index("const cached=_sessionHtmlCache.get(sid);")
+    assert cached_lookup < candidate, body
+    assert "_messageRenderCacheSignature(" not in body[:candidate], body
+
+
 def test_render_signature_tracks_message_content_and_settled_tool_cards():
     signature_fn = UI_JS[UI_JS.index("function _messageRenderCacheSignature()"):UI_JS.index("function _clipCliToolSnippet")]
     assert "msgContent(m)" in signature_fn
@@ -295,3 +310,106 @@ def test_depth_guard_survives_deep_and_cyclic_payloads():
     out = _run_insertion_order_node()
     assert out["deepDeterministic"], "100-level-deep args must hash deterministically"
     assert out["cyclicComputes"], "cyclic args must fall back to [unserializable], not hang"
+
+
+_LIVE_BURST_NODE_BODY = r"""
+function makeLiveState(reasoning, editedContent = false) {
+  const live = {role: 'assistant', reasoning, _live: true, _ts: 123};
+  return {
+    messages: Array.from({length: 120}, (_, index) => ({
+      ...live,
+      content: `segment-${index}${editedContent && index === 119 ? '-edited' : ''}`,
+      _activityBurstId: index + 1,
+    })),
+    toolCalls: [],
+    session: {session_id: 'sid', message_count: 120, updated_at: 111},
+  };
+}
+function signatureWithCharCount(state) {
+  globalThis.S = state;
+  let chars = 0;
+  const original = String.prototype.charCodeAt;
+  String.prototype.charCodeAt = function(index) {
+    chars++;
+    return original.call(this, index);
+  };
+  try {
+    return {signature: _messageRenderCacheSignature(), chars};
+  } finally {
+    String.prototype.charCodeAt = original;
+  }
+}
+const reasoning = 'R'.repeat(20000);
+function snippetSequenceState(snippets) {
+  return {
+    messages: [],
+    toolCalls: snippets.map((snippet, index) => ({tid: `tool-${index}`, snippet})),
+    session: null,
+  };
+}
+const sequenceA = 'a'.repeat(4000);
+const sequenceB = 'b'.repeat(4000);
+const aba = signatureWithCharCount(snippetSequenceState([sequenceA, sequenceB, sequenceA]));
+const abb = signatureWithCharCount(snippetSequenceState([sequenceA, sequenceB, sequenceB]));
+const abba = signatureWithCharCount(snippetSequenceState([sequenceA, sequenceB, sequenceB, sequenceA]));
+const abab = signatureWithCharCount(snippetSequenceState([sequenceA, sequenceB, sequenceA, sequenceB]));
+const initialState = makeLiveState(reasoning);
+const initial = signatureWithCharCount(initialState);
+const initialAgain = signatureWithCharCount(makeLiveState(reasoning));
+const changedReasoningTogether = signatureWithCharCount(makeLiveState(reasoning + 'x'));
+const changedSegmentContent = signatureWithCharCount(makeLiveState(reasoning, true));
+const otherLong = 'Q'.repeat(20000);
+const distinctState = makeLiveState(reasoning);
+distinctState.messages[0].reasoning = otherLong;
+const distinct = signatureWithCharCount(distinctState);
+const swappedState = makeLiveState(reasoning);
+swappedState.messages[0].reasoning = otherLong;
+swappedState.messages[1].reasoning = reasoning;
+swappedState.messages[0].content = 'segment-1';
+swappedState.messages[1].content = 'segment-0';
+const swapped = signatureWithCharCount(swappedState);
+console.log(JSON.stringify({
+  equalLengthRepeatIdentityPreserved: aba.signature !== abb.signature && abba.signature !== abab.signature,
+  initial,
+  deterministic: initial.signature === initialAgain.signature,
+  reasoningMutationDetected: initial.signature !== changedReasoningTogether.signature,
+  contentMutationDetected: initial.signature !== changedSegmentContent.signature,
+  distinctMutationDetected: initial.signature !== distinct.signature,
+  swapDetected: distinct.signature !== swapped.signature,
+  sourceUnmodified: initialState.messages.every(m => m.reasoning === reasoning),
+}));
+"""
+
+
+def _run_live_burst_node() -> dict:
+    assert NODE, "node is required for the live-burst signature harness"
+    script = (
+        f"const window = {{}};\n"
+        f"{_collect_functions(['_messageRenderCacheSignature', '_addBoundedHash', '_hashObjectInto', 'msgContent', '_messageHasReasoningPayload'])}\n"
+        f"{_LIVE_BURST_NODE_BODY}"
+    )
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_repeated_live_reasoning_does_not_repeat_full_string_hashing():
+    """Live burst projection shares one reasoning string across every segment.
+
+    Recomputing its full value once per segment made an 80-anchor live turn
+    roughly quadratic in rendered reasoning. Repeated equal values are
+    semantically redundant inside one signature computation, but every
+    content/position mutation still has to invalidate cached HTML.
+    """
+    out = _run_live_burst_node()
+    assert out["equalLengthRepeatIdentityPreserved"], out
+    assert out["initial"]["chars"] < 1_000_000, (
+        "120 segments x 20,000 reasoning chars should require less than 1M "
+        f"character visits after interning; got {out['initial']['chars']}"
+    )
+    assert out["deterministic"]
+    assert out["reasoningMutationDetected"]
+    assert out["contentMutationDetected"]
+    assert out["distinctMutationDetected"]
+    assert out["swapDetected"]
+    assert out["sourceUnmodified"]

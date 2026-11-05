@@ -980,7 +980,7 @@ def test_transparent_settled_path_dedupes_echoed_thinking():
     (mirroring the compact path's seenReasons) so the same reasoning does not
     render twice / out of chronological order. (Trifecta O-Bug1.)"""
     assert "transparentSeenThinking" in UI_JS
-    assert "_normalizeThinkingEchoCompare(event.thinkingText)" in UI_JS
+    assert "_normalizeThinkingEchoCompareCached(event.thinkingText,thinkingEchoCache)" in UI_JS
 
 
 def test_transparent_thinking_card_is_reset_to_flat_quiet_row():
