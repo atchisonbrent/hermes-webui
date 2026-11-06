@@ -185,7 +185,7 @@ def _post_reasoning(body, session, *, save_error=None, visible=True, config_erro
         patch("api.routes._get_session_agent_lock", return_value=_MutationLock()),
         patch(
             "api.routes.write_reasoning_effort",
-            side_effect=lambda effort, *_a: (
+            side_effect=lambda effort, *_a, **_kw: (
                 events.append("config"),
                 (_ for _ in ()).throw(config_error) if config_error else None,
                 effort,
@@ -773,13 +773,16 @@ def test_reasoning_pick_writes_the_profile_its_readers_use(
     assert handler.status == 200
     assert handler.payload()["reasoning_effort"] == "xhigh"
 
-    # The pick lands in its own profile's file and no other.
+    # The selected model changes only in its owner's file; profile defaults
+    # remain unchanged, so the pick cannot leak to unrelated models.
     owner = session_profile or active
     for name, path in files.items():
-        assert _yaml_effort(path) == ("xhigh" if name == owner else before[name]), name
-    # The owner's next chat and every reader of its default now agree.
+        assert _yaml_effort(path) == before[name], name
+        agent = config._load_yaml_config_file(path)["agent"]
+        assert agent.get("reasoning_overrides", {}).get("gpt-5") == ("xhigh" if name == owner else None), name
+    # The owner's next chat and model-aware readers agree.
     owner_home = profiles.get_hermes_home_for_profile(owner)
-    assert config.effective_session_reasoning_effort(None, owner_home) == "xhigh"
+    assert config.effective_session_reasoning_effort(None, owner_home, model_id="gpt-5") == "xhigh"
     assert models.new_session(
         workspace=str(tmp_path), model="gpt-5", profile=owner
     ).reasoning_effort == "xhigh"
@@ -789,7 +792,7 @@ def test_reasoning_pick_writes_the_profile_its_readers_use(
     expected_active = "xhigh" if owner == active else before[active]
     assert handler.payload()["reasoning_effort"] == expected_active
     assert expected_active == config.effective_session_reasoning_effort(
-        None, profiles.get_hermes_home_for_profile(active)
+        None, profiles.get_hermes_home_for_profile(active), model_id="gpt-5"
     )
 
 
@@ -895,6 +898,21 @@ def test_reasoning_get_unloadable_session_keeps_profile_answer():
     # Master's answer, not a 404 that hides the chip and re-fires every sync.
     assert handler.status == 200
     assert "effort_override" not in captured
+
+
+@pytest.mark.parametrize(
+    ("session_effort", "expected"),
+    [(None, "low"), ("medium", "medium"), ("high", "high"), ("", "")],
+)
+def test_explicit_session_effort_precedes_model_default(monkeypatch, session_effort, expected):
+    cfg = {"agent": {
+        "reasoning_effort": "medium",
+        "reasoning_overrides": {"alias-target-model": "low"},
+    }}
+    monkeypatch.setattr(config, "coerce_reasoning_effort_for_model", lambda raw, *_a, **_k: raw or "")
+    assert config.resolve_session_reasoning_effort(
+        cfg, session_effort=session_effort, model_id="alias-target-model",
+    ) == expected
 
 
 @pytest.mark.parametrize("session_effort", ["low", "", None])

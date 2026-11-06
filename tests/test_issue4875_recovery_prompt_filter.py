@@ -62,6 +62,18 @@ _PARAMS = [
 ]
 
 
+# Verbatim Hermes agent/conversation_loop.py _CODEX_INCOMPLETE_NUDGE.
+# Legacy runtime rows carry this text without a synthetic flag.
+RECOVERY_NUDGE = '[System: Your previous response contained only internal reasoning and never produced a visible answer or tool call. Do not keep thinking. Produce your final answer as plain text now (or make the tool call you were planning).]'
+
+
+@pytest.mark.parametrize(('src', 'name'), _PARAMS)
+def test_reasoning_only_nudge_exact_match(src, name):
+    assert _eval_filter(src, name, [RECOVERY_NUDGE, 'User quoted: '+RECOVERY_NUDGE,
+        RECOVERY_NUDGE+' Why does this appear?', '[System: Your previous response contained only internal reasoning.]',
+        RECOVERY_NUDGE.replace(' ', '\n  '), '[Workspace::v1: /fixture]\n'+RECOVERY_NUDGE]) == [True, False, False, False, True, False]
+
+
 @pytest.mark.parametrize(("src", "name"), _PARAMS)
 def test_all_continuation_variants_filtered(src, name):
     assert _eval_filter(src, name, RECOVERY_VARIANTS) == [True, True, True]

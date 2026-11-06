@@ -235,7 +235,9 @@ def test_same_session_reload_anchor_uses_absolute_session_message_index():
 
 def test_refresh_session_updates_message_window_offset_before_rerender():
     refresh = _function_body(UI_JS, "function refreshSession")
-    messages_idx = refresh.index("S.messages = data.session.messages || [];")
+    messages_idx = refresh.index("S.messages = typeof _reconcileRunningMessageWindow")
+    assert "_reconcileRunningMessageWindow(data.session,data.session.messages || [])" in refresh
+    assert ": (data.session.messages || []);" in refresh
     truncated_idx = refresh.index("_messagesTruncated = !!data.session._messages_truncated;")
     offset_idx = refresh.index("_oldestIdx = data.session._messages_offset || 0;")
     render_idx = refresh.index("_renderMessagesWithScrollSnapshot();")

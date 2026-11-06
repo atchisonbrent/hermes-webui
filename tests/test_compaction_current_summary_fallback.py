@@ -25,6 +25,10 @@ from tests.test_anchor_fallback_ownership import (
 
 
 _REAL_FUNCTIONS = (
+    "_assistantDisplayCommentary",
+    "_renderUserInputReceipts",
+    "_placeSettledCompactWorklogs",
+    "_isDelegatedSubagentTranscript",
     "_transparentStreamOrderedParts",
     "_legacySettledFallbackHasToolMetadata",
     "_isContextCompactionText",
@@ -246,6 +250,7 @@ global.setTimeout = (fn) => fn();
 function $(id) { return elements[id] || null; }
 function isTransparentStream() { return false; }
 function isCompactWorklogMode() { return true; }
+function _isDelegatedSubagentRow() { return false; } // All scenarios are ordinary sessions.
 function isSimplifiedToolCalling() { return true; }
 function t(key) { return key; }
 function li() { return ''; }

@@ -23,7 +23,7 @@ def test_loading_older_messages_expands_render_window_before_rendering():
 
     replace_idx = body.index("S.messages = nextMessages")
     expand_idx = body.index("_messageRenderWindowSize=_currentMessageRenderWindowSize()")
-    render_idx = body.index("renderMessages({ preserveScroll: true });")
+    render_idx = body.index("renderMessages({ preserveScroll: true, reuseSettledTurns: true, priorToolCalls, prependedHistory: prependedMessages.length });")
 
     assert replace_idx < expand_idx < render_idx, (
         "scroll-to-top paging must expand the DOM render window before renderMessages(); "
@@ -36,10 +36,10 @@ def test_loading_older_messages_expands_render_window_before_rendering():
 def test_loading_older_messages_preserves_viewport_without_bottom_snap():
     body = _function_body(SESSIONS_JS, "async function _loadOlderMessages")
 
-    assert "renderMessages({ preserveScroll: true });" in body
+    assert "renderMessages({ preserveScroll: true, reuseSettledTurns: true, priorToolCalls, prependedHistory: prependedMessages.length });" in body
     assert "const viewportAnchor = (container && typeof _captureMessageViewportAnchor === 'function')" in body
     assert "_captureMessageViewportAnchor()" in body
-    assert "_restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)" in body
+    assert "_restoreMessageViewportAnchor(viewportAnchor, prependedMessages.length)" in body
     assert "const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')" in body
     assert "if (!restoredViaAnchor) {" in body
     assert "const virtualAddedHeight = (typeof _messageVirtualPrependedHeightDelta === 'function')" in body
@@ -48,7 +48,7 @@ def test_loading_older_messages_preserves_viewport_without_bottom_snap():
     assert "container.scrollTop = oldTop + addedHeight" in body
     assert "container.scrollTop = newScrollH - prevScrollH" not in body
 
-    restore_idx = body.index("_restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)")
+    restore_idx = body.index("_restoreMessageViewportAnchor(viewportAnchor, prependedMessages.length)")
     virtual_idx = body.index("_messageVirtualPrependedHeightDelta(addedRenderable)")
     scroll_delta_idx = body.index("Math.max(0, newScrollH - prevScrollH)")
     unpin_idx = body.rindex("_scrollPinned = false")
@@ -69,7 +69,7 @@ def test_loading_older_messages_captures_anchor_before_replacing_messages():
 
     anchor_idx = body.index("const viewportAnchor = (container && typeof _captureMessageViewportAnchor === 'function')")
     replace_idx = body.index("S.messages = nextMessages")
-    render_idx = body.index("renderMessages({ preserveScroll: true });")
-    restore_idx = body.index("_restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)")
+    render_idx = body.index("renderMessages({ preserveScroll: true, reuseSettledTurns: true, priorToolCalls, prependedHistory: prependedMessages.length });")
+    restore_idx = body.index("_restoreMessageViewportAnchor(viewportAnchor, prependedMessages.length)")
 
     assert anchor_idx < replace_idx < render_idx < restore_idx

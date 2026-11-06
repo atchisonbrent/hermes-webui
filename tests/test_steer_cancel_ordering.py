@@ -237,7 +237,14 @@ def test_cache_only_steer_is_atomic_with_stop(scene, monkeypatch, gap):
     agent.interrupt.assert_called_once()
     if order == ["steer", "cancel"]:
         # Steer queued before Stop claimed cancellation, under the stream lock.
-        assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
+        receipt = result["user_input"]
+        assert receipt["content"] == "guidance"
+        assert receipt["kind"] == "steer"
+        assert receipt["input_id"]
+        assert result == {
+            "accepted": True, "fallback": None, "stream_id": "run",
+            "display_recorded": True, "user_input": receipt,
+        }
         agent.steer.assert_called_once_with("guidance")
         assert state["enqueue"] == {"held": True, "alive": True, "phase": "running"}
     else:

@@ -143,6 +143,36 @@ def test_plain_provider_prefix_slash_model_id_does_not_duplicate_picker_row(tmp_
     assert results == [True, True, True, True, True]
 
 
+def test_provider_qualified_vendor_model_does_not_duplicate_picker_row(tmp_path):
+    results = _equivalent_cases(
+        tmp_path,
+        [
+            {
+                "modelId": "wandb/moonshotai/Kimi-K2.7-Code",
+                "badge": {"provider": "wandb"},
+                "entries": [
+                    {
+                        "value": "moonshotai/Kimi-K2.7-Code",
+                        "providerId": "wandb",
+                    }
+                ],
+            },
+            {
+                "modelId": "lmstudio/qwen/qwen3.8-27b",
+                "badge": {"provider": "lmstudio"},
+                "entries": [
+                    {
+                        "value": "qwen/qwen3.8-27b",
+                        "providerId": "lmstudio",
+                    }
+                ],
+            },
+        ],
+    )
+
+    assert results == [True, True]
+
+
 def test_plain_provider_prefix_top_level_row_other_provider_remains_distinct(tmp_path):
     """#7290 guard: reaching the top-level row's provider through its badge must
     not collapse the same model id from a different provider (#3360 family)."""
@@ -189,6 +219,25 @@ def test_plain_provider_prefix_same_model_other_provider_remains_distinct(tmp_pa
                 "badge": {"provider": "commandcode"},
                 "entries": entries,
             },
+        ],
+    )
+    assert results == [False]
+
+
+def test_provider_qualified_vendor_model_from_another_provider_remains_distinct(tmp_path):
+    results = _equivalent_cases(
+        tmp_path,
+        [
+            {
+                "modelId": "wandb/moonshotai/Kimi-K2.7-Code",
+                "badge": {"provider": "wandb"},
+                "entries": [
+                    {
+                        "value": "moonshotai/Kimi-K2.7-Code",
+                        "providerId": "lmstudio",
+                    }
+                ],
+            }
         ],
     )
     assert results == [False]

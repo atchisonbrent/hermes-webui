@@ -444,6 +444,9 @@ def test_session_list_cache_rebuild_retries_after_invalidation():
 
 
 def test_session_list_cache_source_stamp_tracks_state_db_wal(tmp_path, monkeypatch):
+    from api import route_session_list_cache
+    # WAL invalidation is the idle contract; active turns intentionally freeze it.
+    monkeypatch.setattr(route_session_list_cache, "_session_list_cache_active_stream_ids", lambda: set())
     state_db = tmp_path / "state.db"
     state_db.write_text("db", encoding="utf-8")
     state_db_wal = tmp_path / "state.db-wal"

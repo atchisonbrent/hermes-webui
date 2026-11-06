@@ -105,9 +105,10 @@ async function _probeOfflineRecovery(){
     try{ctrl=(typeof AbortController!=='undefined')?new AbortController():null;}catch(_){ctrl=null;}
     if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},OFFLINE_HEALTH_TIMEOUT_MS);
     try{
-      const opts={cache:'no-store',credentials:'include'};
+      const opts={cache:'no-store',credentials:'include',headers:{'X-Requested-With':'XMLHttpRequest'}};
       if(ctrl)opts.signal=ctrl.signal;
       const res=await fetcher(_offlineHealthUrl(),opts);
+      if(_redirectIfUnauth(res))return false;
       return !!(res&&res.ok);
     }catch(_){return false;}
     finally{if(timer)clearTimeout(timer);}
@@ -199,7 +200,18 @@ function _patchOfflineFetch(){
   _offlineFetchPatched=true;
   _offlineRawFetch=window.fetch.bind(window);
   window.fetch=async function(...args){
-    try{return await _offlineRawFetch(...args);}
+    try{
+      const input=args[0];
+      const init=args[1]||{};
+      let requestUrl=null;
+      try{requestUrl=new URL(typeof input==='string'||input instanceof URL?input:input.url,document.baseURI||location.href);}catch(_){}
+      if(requestUrl&&requestUrl.origin===location.origin){
+        const headers=new Headers(init.headers||(input&&input.headers)||undefined);
+        if(!headers.has('X-Requested-With'))headers.set('X-Requested-With','XMLHttpRequest');
+        args=[input,{...init,headers}];
+      }
+      return await _offlineRawFetch(...args);
+    }
     catch(e){
       if(!_isAbortError(e)&&(e instanceof TypeError||!_browserReportsOnline())){
         void _showOfflineBannerIfProbeFails(_browserReportsOnline()?'network':'browser');
@@ -210,17 +222,26 @@ function _patchOfflineFetch(){
 }
 function initOfflineMonitor(){
   _patchOfflineFetch();
+  const probeOnResume=()=>{
+    if(document.hidden||document.visibilityState==='hidden')return;
+    void _probeOfflineRecovery();
+  };
   window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});});
   window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
+  window.addEventListener('focus',probeOnResume);
+  window.addEventListener('pageshow',probeOnResume);
+  document.addEventListener('visibilitychange',probeOnResume);
   if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
 else initOfflineMonitor();
-// Redirect to login when the server responds with 401 (auth session expired).
-// Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
-// escaping to the personal site root /login.
-// #5578: on a login-shaped page, reload 'login' WITHOUT a next (avoid self-nesting).
-function _redirectIfUnauth(res){if(res&&res.status===401){var _p=(window.location.pathname||'').replace(/\/+$/,'');if(/(?:^|\/)login$/.test(_p)){window.location.href='login';}else{window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);}return true;}return false;}
+// A 401 can come from WebUI auth or an identity-aware reverse proxy. Reload the
+// current top-level URL so the owner of that auth boundary can run its normal
+// navigation flow (for example, Cloudflare Access can refresh its HttpOnly
+// application token). Deduping matters because several API calls often settle
+// together after a suspended mobile app resumes.
+let _authReloadStarted=false;
+function _redirectIfUnauth(res){if(!res||res.status!==401)return false;if(!_authReloadStarted){_authReloadStarted=true;window.location.reload();}return true;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
@@ -6094,10 +6115,6 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
     const entryProvider=_entryProvider(existing);
     return !provider||!entryProvider||entryProvider===provider;
   })) return true;
-  // @provider:model is an equivalent routing spelling only when an existing
-  // picker row belongs to that same provider. This supports named custom
-  // providers (@custom:name:model) without collapsing matching model IDs from
-  // different providers.
   const rawId=String(modelId||'');
   // `<provider>/<model>` is another routing spelling of `<model>`, so its badge
   // key must not become a second picker row. configured_model_badges holds every
@@ -6120,6 +6137,10 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
       &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
     )) return true;
   }
+  // @provider:model is an equivalent routing spelling only when an existing
+  // picker row belongs to that same provider. This supports named custom
+  // providers (@custom:name:model) without collapsing matching model IDs from
+  // different providers.
   const prefix=provider?`@${provider}:`:'';
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
@@ -10610,13 +10631,37 @@ function _sanitizeThinkingDisplayText(text){
 function _normalizeThinkingEchoCompare(text){
   return String(text||'').replace(/\s+/g,' ').trim();
 }
-
 function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
   const clean=_sanitizeThinkingDisplayText(thinkingText);
   const thinkingNorm=_normalizeThinkingEchoCompare(clean);
   if(!thinkingNorm) return '';
   for(const visibleText of visibleTexts){
     const visibleNorm=_normalizeThinkingEchoCompare(visibleText);
+    if(visibleNorm&&visibleNorm===thinkingNorm) return '';
+  }
+  return clean;
+}
+
+function _thinkingEchoMemoized(cache, kind, text, compute){
+  const source=String(text||'');
+  if(!cache||typeof cache.get!=='function'||typeof cache.set!=='function') return compute(source);
+  let values=cache.get(source);
+  if(!values){values={};cache.set(source,values);}
+  if(!Object.prototype.hasOwnProperty.call(values,kind)) values[kind]=compute(source);
+  return values[kind];
+}
+function _sanitizeThinkingDisplayTextCached(text, cache){
+  return _thinkingEchoMemoized(cache,'sanitized',text,_sanitizeThinkingDisplayText);
+}
+function _normalizeThinkingEchoCompareCached(text, cache){
+  return _thinkingEchoMemoized(cache,'normalized',text,_normalizeThinkingEchoCompare);
+}
+function _stripVisibleAssistantEchoFromThinkingCached(thinkingText, cache, ...visibleTexts){
+  const clean=_sanitizeThinkingDisplayTextCached(thinkingText,cache);
+  const thinkingNorm=_normalizeThinkingEchoCompareCached(clean,cache);
+  if(!thinkingNorm) return '';
+  for(const visibleText of visibleTexts){
+    const visibleNorm=_normalizeThinkingEchoCompareCached(visibleText,cache);
     if(visibleNorm&&visibleNorm===thinkingNorm) return '';
   }
   return clean;
@@ -10694,7 +10739,7 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(token,raw_ref,offset)=>{
+  s=s.replace(/MEDIA:[ \t]*([^\s\)\]]+)/g,(token,raw_ref,offset)=>{
     const parts=_mediaTokenParts(s,offset,raw_ref);
     if(!parts) return token;
     media_stash.push(parts[0]);
@@ -10998,7 +11043,7 @@ function renderMd(raw){
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/(!?)\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:|\/(?![\/\\]))[^\s\)]+)\)/g, (match,bang,lb,u)=>{if(bang)return match;_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
     t=_autolinkBareText(t);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
@@ -11186,7 +11231,7 @@ function renderMd(raw){
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
+  s=s.replace(/(!?)\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:|\/(?![\/\\]))[^\s\)]+)\)/g,(match,bang,label,url)=>bang?match:_markdownAnchor(label,url));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
@@ -11285,6 +11330,7 @@ function renderMd(raw){
     if(/^(javascript|vbscript):/i.test(compact)) return false;
     if(/^https?:\/\//i.test(raw)) return true;
     if(/^(mailto:|tel:|message:)/i.test(raw)) return true;
+    if(!img && /^\/(?!\/)/.test(raw) && !/[\\\u0000-\u0020\u007f]/.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
     if(!img && (/^api\//i.test(raw) || /^#/.test(raw) || _isInternalSessionHref(raw))) return true;
     return false;
@@ -11331,6 +11377,8 @@ function renderMd(raw){
     }
     if(name==='a'){
       if(!_isSafeUrl(a.href,false)) return '<a>';
+      // Session navigation is an application action, not an ordinary safe URL.
+      if(String(a.class||'').split(/\s+/).includes('session-link') && !_isInternalSessionHref(a.href)) return '<a>';
       const target=a.target==='_blank'?' target="_blank"':'';
       const rel=a.rel==='noopener'?' rel="noopener"':'';
       const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back','session-link']);
@@ -11561,7 +11609,7 @@ function _getExplicitBusyCommandAction(text){
 function getComposerPrimaryAction(){
   const msg=$('msg');
   const hasContent=_composerHasContent();
-  const locked=!!(msg&&msg.disabled);
+  const locked=!!(msg&&msg.disabled)||!!(S.session&&(S.session.read_only||S.session.is_read_only));
   if(locked) return 'disabled';
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
   const isBusy=!!S.busy||compressionRunning;
@@ -11588,6 +11636,10 @@ function getComposerPrimaryAction(){
 function _applyBusyComposerPlaceholder(){
   const input=$('msg');
   if(!input) return;
+  if(S.session&&(S.session.read_only||S.session.is_read_only)){
+    input.placeholder=t('composer_read_only');
+    return;
+  }
   if(_compressionPlaceholderSaved!==null) return;
   if(input.disabled) return;
   if(_composerHasContent()) return;
@@ -11628,6 +11680,8 @@ function _setComposerPrimaryButtonIcon(btn,action){
 }
 
 function updateSendBtn(){
+  const input=$('msg');
+  if(input) input.readOnly=!!(S.session&&(S.session.read_only||S.session.is_read_only));
   const btn=$('btnSend');
   if(!btn){
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
@@ -11643,7 +11697,8 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(S.session&&(S.session.read_only||S.session.is_read_only)) _btnTitle=_tt('composer_read_only','Read-only conversation');
+    else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
@@ -12313,11 +12368,11 @@ function _stripForTTS(text){
   // Replace MEDIA: paths with a simple label
   // #7680 re-gate (9/22): TTS does not need the backtick-aware
   // terminator. Inline code was already stripped at the top of this
-  // function (`:9137`), so a bare ``MEDIA:[^\s]+`` is correct and
+  // function, so a bare ``MEDIA:[ \t]*[^\s]+`` is correct and
   // round-trips the original filename including a backtick in the
   // path — the only thing the TTS ever does with the captured
   // substring is throw it away.
-  text=text.replace(/MEDIA:[^\s]+/g,'a file');
+  text=text.replace(/MEDIA:[ \t]*[^\s]+/g,'a file');
   // Strip emoji and emoticons
   text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
   // Strip HTML tags that may leak through markdown
@@ -14433,7 +14488,9 @@ async function refreshSession() {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
     S.session = data.session;
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
-    S.messages = data.session.messages || [];
+    S.messages = typeof _reconcileRunningMessageWindow==='function'
+      ? _reconcileRunningMessageWindow(data.session,data.session.messages || [])
+      : (data.session.messages || []);
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
     if (typeof _mergePendingSessionMessage !== 'function') {
@@ -15702,6 +15759,7 @@ function msgContent(m){
 function _isRecoveryControlMessageText(text){
   const normalized=String(text||'').replace(/\s+/g,' ').trim();
   if(!normalized) return false;
+  if(normalized==='[System: Your previous response contained only internal reasoning and never produced a visible answer or tool call. Do not keep thinking. Produce your final answer as plain text now (or make the tool call you were planning).]') return true;
   const systemRecovery=/^\[System:/i.test(normalized)
     && (/continue exactly where you left off/i.test(normalized)
       || /do not retry the same tool call/i.test(normalized));
@@ -15723,10 +15781,17 @@ function _assistantAnchorSceneFinalAnswerText(m){
   const text=scene&&typeof scene.final_answer==='string'?scene.final_answer:'';
   return String(text||'').trim()?text:'';
 }
+// Only server-projected public commentary is displayable. Raw provider items
+// contain replay data and are not a presentation fallback.
+function _assistantDisplayCommentary(m){
+  if(!m||m.role!=='assistant'||m.display_kind==='hidden'||!Array.isArray(m.display_commentary)) return [];
+  return m.display_commentary.filter(text=>typeof text==='string'&&text.trim());
+}
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
   if(_assistantAnchorSceneFinalAnswerText(m)) return true;
+  if(_assistantDisplayCommentary(m).length) return true;
   const content=m.content;
   if(typeof content==='string') return !_isAssistantEmptyPlaceholderContent(m, content)&&!!content.trim();
   if(!Array.isArray(content)) return false;
@@ -15861,6 +15926,8 @@ function _assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs){
 }
 function _assistantReasoningPayloadText(m){
   if(!m||m.role!=='assistant') return '';
+  if(typeof m.display_reasoning==='string'&&(m.display_reasoning.trim()||
+    ['reasoning','reasoning_content','reasoning_details'].some(key=>typeof m[key]==='string'&&m[key].trim()))) return m.display_reasoning.trim();
   const direct=m.reasoning_content||m.reasoning||m.thinking||m._reasoning||'';
   if(String(direct||'').trim()) return String(direct).trim();
   if(Array.isArray(m.content)){
@@ -15987,10 +16054,11 @@ function _assistantTurnVisibleContentMap(visWithIdx, turnBoundaryByRawIdx){
   flush();
   return out;
 }
-function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visibleContent, turnFinalVisibleContent, turnVisibleContents){
+function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visibleContent, turnFinalVisibleContent, turnVisibleContents, echoCache){
   const thinkingText=_assistantReasoningPayloadText(m);
   const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
-  return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+  if(arguments.length<7) return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+  return _stripVisibleAssistantEchoFromThinkingCached(thinkingText, echoCache, visibleContent, turnFinalVisibleContent, ...visibleTexts);
 }
 // A delegated subagent's whole task is one turn; split its worklog at each interim text.
 function _isDelegatedSubagentTranscript(){
@@ -17421,15 +17489,22 @@ function _materializeDeferredWorklogRows(group){
 }
 function _deferredWorklogRowsFromGroup(group){
   // Recover a settled worklog's rows from S.messages using the group's
-  // disclosure key `anchor-scene:<rawIdx>`. Used after an HTML-cache restore
+  // worklog key `anchor-scene:<rawIdx>`. Used after an HTML-cache restore
   // where the _deferredWorklogRows JS property was dropped. (#5839)
-  const key=group&&group.getAttribute&&group.getAttribute('data-activity-disclosure-key');
+  const key=group&&group.getAttribute&&(group.getAttribute('data-tool-worklog-key')||group.getAttribute('data-activity-disclosure-key'));
   const m=key&&/^anchor-scene:(\d+)$/.exec(key);
   if(!m) return null;
   const msg=S.messages&&S.messages[Number(m[1])];
   const scene=msg&&msg._anchor_activity_scene;
   if(!scene) return null;
-  return _anchorSceneRowsForRendering(scene,{settled:true});
+  const finalAnswer=String(scene.final_answer||_assistantAnchorSceneFinalAnswerText(msg)||msgContent(msg)||'');
+  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const lastTool=_anchorSceneLastNonTerminalWorkRowIndex(rows);
+  const intermediate=rows.filter((row,index)=>row.role!=='prose'||(
+    !_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,finalAnswer)&&
+    !(index>lastTool&&_anchorSceneLiveTokenFinalPrefix(row,row.text,finalAnswer))
+  ));
+  return _settledSceneRowsWithUserInputs(_compactSceneRowsWithPersistedUpdates(intermediate,group.parentElement,Number(m[1])),String(msg._anchor_stream_id||scene.stream_id||scene.identity?.stream_id||''),group.parentElement);
 }
 function _rehydrateDeferredWorklogsFromCache(root){
   // After restoring a transcript from _sessionHtmlCache, deferred settled
@@ -17719,6 +17794,21 @@ function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
   if(!group||!list) return;
   let wroteProse=false;
   const seenReasons=opts&&opts.seenReasons;
+  // Adapt persisted public commentary to native prose rows, without a second
+  // presentation layer or reading raw provider replay payloads in the browser.
+  const rawIdx=anchor?.dataset?.msgIdx;
+  const message=typeof S!=='undefined'&&rawIdx!==undefined&&rawIdx!==''
+    ? S.messages?.[Number(rawIdx)] : null;
+  if(Array.isArray(message?.display_commentary)){
+    for(const [part,text] of _assistantDisplayCommentary(message).entries()){
+      if(text.trim()===String(anchor.getAttribute('data-raw-text')||'').trim()) continue;
+      const key=`commentary:${rawIdx}:${part}`;
+      if(seenReasons?.has(key)) continue;
+      const prose=_anchorSceneNodeForRow({role:'prose',row_id:key,text,
+        timestamp:message._ts||message.timestamp,status:'completed'},{settled:!opts?.live});
+      if(prose){list.appendChild(prose);wroteProse=true;seenReasons?.add(key);}
+    }
+  }
   if(!opts||opts.includeAnchorReason!==false){
     const anchorKey=anchor&&anchor.dataset&&anchor.dataset.msgIdx?`anchor:${anchor.dataset.msgIdx}`:'';
     if(!anchorKey||!seenReasons||!seenReasons.has(anchorKey)){
@@ -17821,6 +17911,32 @@ function _anchorSceneRowsForRendering(scene, opts){
       out.push(row);
     }
   }
+  if(settled){
+    // A provider can persist text/tool/text as separate prose rows while the
+    // live scene already contains the joined narration. Reconcile that one
+    // message as a unit; never discard individual short text fragments alone.
+    const groups=new Map();
+    const liveTexts=new Set();
+    for(const row of out){
+      if(row.role!=='prose') continue;
+      const idx=row.group?.assistant_msg_idx??row.payload?.assistant_msg_idx;
+      if(row.source_event_type==='settled_message'&&idx!==undefined&&idx!==null){
+        if(!groups.has(idx)) groups.set(idx,[]);
+        groups.get(idx).push(row);
+      }else liveTexts.add(proseTextKey(row.text));
+    }
+    const joined=new Map();
+    const redundant=new Set();
+    for(const parts of groups.values()){
+      if(parts.length<2) continue;
+      const text=parts.map(row=>row.text).join('\n');
+      for(const row of parts){
+        if(liveTexts.has(proseTextKey(text))) redundant.add(row);
+        else joined.set(row,text);
+      }
+    }
+    return out.filter(row=>!redundant.has(row)).map(row=>joined.has(row)?{...row,_proseMessageText:joined.get(row)}:row);
+  }
   return out;
 }
 function _anchorSceneIsSettledSuccessfulCompression(row, settled){
@@ -17896,7 +18012,11 @@ function _anchorSceneNodeForRow(row, opts){
   const settled=!!(opts&&opts.settled);
   if(!row) return null;
   let node=null;
-  if(row.role==='prose'){
+  if(row.role==='user_input'){
+    const id=String(row.receipt?.input_id||'');
+    const previous=id?$('msgInner')?.querySelector(`[data-user-input-id="${CSS.escape(id)}"]`):null;
+    node=_userInputReceiptNode(row.receipt,previous);
+  }else if(row.role==='prose'){
     const text=String(row.text||'').trim();
     if(!text) return null;
     // Incremental live rendering: reuse a persistent smd node fed only the delta
@@ -17978,7 +18098,9 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     segmentSeq:row.segment_seq||row.segmentSeq||'',
     burstId:row.activity_burst_id||row.burst_id||row.burstId||'',
   };
-  if(row.role==='prose'){
+  if(row.role==='user_input'){
+    node=_userInputReceiptNode(row.receipt);
+  }else if(row.role==='prose'){
     // The settled assistant segment already owns the FINAL answer prose, so a
     // prose row whose text matches the final answer must be suppressed here to
     // avoid duplicating the answer. But INTERMEDIATE progress prose (the
@@ -17992,7 +18114,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     if(!text) return null;
     const finalAnswer=String((opts&&opts.finalAnswer)||'').trim();
     if(opts&&opts.liveTokenFinalPrefixEligible&&_anchorSceneLiveTokenFinalPrefix(row,text,finalAnswer)) return null;
-    if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)) return null;
+    if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||text,finalAnswer)) return null;
     node=_anchorSceneNodeForRow(row,{settled});
     if(!node) return null;
     node=_decorateTransparentEventRow(node,{type:'prose',text,preview:text,...meta});
@@ -18010,7 +18132,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     });
   }else if(row.role==='tool'){
     const toolCall=_anchorSceneToolCallFromRow(row,{settled});
-    node=_decorateTransparentEventRow(buildToolCard(toolCall),{
+    node=_decorateTransparentEventRow(buildToolCard(toolCall,{deferDetail:settled}),{
       type:'tool',
       name:toolCall&&toolCall.name,
       status:_transparentToolStatus(toolCall,settled),
@@ -18104,6 +18226,9 @@ function _anchorSceneWorklogGroup(blocks, opts){
       collapsed:(opts&&opts.collapsed!==undefined)?opts.collapsed:!live,
       live,
       activityKey,
+      disclosureKey:opts&&opts.disclosureKey,
+      restoreDisclosure:!!(opts&&opts.restoreDisclosure),
+      forceOpen:!!(opts&&opts.forceOpen),
       beforeAnchor:!!(opts&&opts.beforeAnchor),
       anchor:(opts&&opts.anchor)||null,
       turnDuration:opts&&opts.turnDuration,
@@ -18120,29 +18245,109 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
   return group;
 }
-// Tool DOM is expensive and usually immutable while prose streams. Keep the
+// Tool and completed thinking DOM are usually unchanged while prose streams. Keep the
 // signature on the node, not in a global cache: removing a turn drops its cache,
 // and HTML-restored nodes take the normal build/rehydration path once. Include
 // the full row so in-place result/argument corrections cannot reuse stale HTML.
-function _anchorSceneToolRenderSignature(row, opts){
-  if(!row||row.role!=='tool') return null;
+function _anchorSceneRetainedRowSignature(row, opts){
+  if(!row) return null;
+  if(row.role==='thinking'){
+    if(row.status!=='completed'||window._showThinking===false) return null;
+    return JSON.stringify([row,opts||{},document.documentElement.lang,
+      _worklogDetailsExpandedDefault()]);
+  }
+  if(row.role!=='tool'&&row.role!=='user_input') return null;
   return JSON.stringify([row,opts||{},document.documentElement.lang,
     typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
 }
+function _anchorSceneToolRenderSignature(row,opts){
+  return _anchorSceneRetainedRowSignature(row,opts);
+}
+
 function _anchorSceneDataRowKey(row, streamId){
   const id=String(row.row_id||row.local_id||'').trim();
   if(!id) return '';
   return `${String(streamId||'').trim()}\u0000${id}\u0000${String(row.role||'activity').trim()}\u0000${String(row.source_event_type||'').trim()}`;
 }
 function _anchorScenePlaceChildren(parent, nodes){
+  // Remove obsolete siblings first so a replacement row cannot make a cached
+  // predecessor look misplaced. The ordered insertion below then moves only
+  // nodes whose parent/sibling relationship actually changed.
+  const keep=new Set(nodes);
+  Array.from(parent.children).forEach(node=>{if(!keep.has(node)) node.remove();});
   let next=null;
   for(let i=nodes.length-1;i>=0;i--){
     const node=nodes[i];
     if(node.parentNode!==parent||node.nextSibling!==next) parent.insertBefore(node,next);
     next=node;
   }
-  const keep=new Set(nodes);
-  Array.from(parent.children).forEach(node=>{if(!keep.has(node)) node.remove();});
+}
+// Preserve persisted updates when an older activity scene is incomplete.
+function _compactSceneRowsWithPersistedUpdates(rows, blocks, finalIdx, opts){
+  const result=rows.slice();
+  const textKey=text=>String(text||'').replace(/\s+/g,' ').trim();
+  const insert=row=>{
+    const time=_anchorSceneRowTimestampSeconds(row);
+    const next=time?result.findIndex(r=>_anchorSceneRowTimestampSeconds(r)>time):-1;
+    if(next<0) result.push(row);else result.splice(next,0,row);
+  };
+  // Older/cropped scenes need not contain every persisted update. Recover only
+  // rendered messages in this turn, never infer or mutate transcript history.
+  for(const node of blocks.querySelectorAll(':scope > .assistant-segment[data-msg-idx]')){
+    const idx=Number(node.dataset.msgIdx);
+    if(!Number.isFinite(idx)||idx>finalIdx) continue;
+    const message=S.messages[idx];
+    const commentary=_assistantDisplayCommentary(message);
+    const absoluteIdx=typeof _messageSessionIndexForRawIdx==='function'?_messageSessionIndexForRawIdx(idx):idx;
+    const timestamp=message?._ts||message?.timestamp;
+    const joined=commentary.join('\n\n');
+    for(const [part,text] of commentary.entries()){
+      if(idx===finalIdx&&textKey(text)===textKey(node.getAttribute('data-raw-text'))) continue;
+      if(result.some(row=>row.role==='prose'&&row.source_event_type==='settled_commentary'&&
+        row.group?.assistant_msg_idx===absoluteIdx&&(row.commentary_index===part||row.commentary_index===null))) continue;
+      // Claim a live echo once. After ownership is assigned, identical text in
+      // another assistant message must not disappear behind this occurrence.
+      const mirror=result.findIndex(row=>row.role==='prose'&&row.source_event_type!=='settled_commentary'&&
+        (row.group?.assistant_msg_idx==null||row.group.assistant_msg_idx===absoluteIdx)&&
+        (textKey(row.text)===textKey(text)||textKey(row.text)===textKey(joined)));
+      if(mirror>=0){
+        const row=result[mirror];
+        result[mirror]={...row,source_event_type:'settled_commentary',
+          commentary_index:commentary.length>1&&textKey(row.text)===textKey(joined)?null:part,
+          group:{...row.group,assistant_msg_idx:absoluteIdx}};
+      }else{
+        insert({role:'prose',row_id:`persisted-update:${idx}:${part}`,text,timestamp,
+          source_event_type:'settled_commentary',commentary_index:part,group:{assistant_msg_idx:absoluteIdx}});
+      }
+    }
+    if(idx>=finalIdx||opts?.commentaryOnly) continue;
+    const text=String(node.getAttribute('data-raw-text')||'').trim();
+    if(!text||_isAssistantEmptyPlaceholderContent(message,text)) continue;
+    if(result.some(r=>r.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(r._proseMessageText||r.text,text))) continue;
+    insert({role:'prose',row_id:`persisted-update:${idx}`,text,timestamp,source_event_type:'settled_message',group:{assistant_msg_idx:idx}});
+  }
+  return result;
+}
+function _settledSceneRowsWithUserInputs(rows, streamId, blocks){
+  const messageTimes=new Map();
+  for(const node of blocks.querySelectorAll('.assistant-segment[data-msg-idx]')){
+    const message=S.messages[Number(node.dataset.msgIdx)];
+    if(!message) continue;
+    const rendered=String(node.getAttribute('data-raw-text')||'');
+    const canonical=Array.isArray(message.content)
+      ? message.content.filter(part=>part&&part.type==='text').map(part=>part.text||part.content||'').join('\n')
+      : msgContent(message);
+    for(const value of [rendered,canonical]){
+      const key=String(value||'').replace(/\s+/g,' ').trim();
+      if(key&&!messageTimes.has(key)) messageTimes.set(key,message._ts||message.timestamp);
+    }
+  }
+  const timedRows=rows.map(row=>{
+    if(row.role!=='prose'||_anchorSceneRowTimestampSeconds(row)) return row;
+    const timestamp=messageTimes.get(String(row._proseMessageText||row.text||'').replace(/\s+/g,' ').trim());
+    return timestamp?{...row,timestamp}:row;
+  });
+  return _liveSceneRowsWithUserInputs(timedRows,streamId);
 }
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
@@ -18412,7 +18617,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:false});
+  const rows=_liveSceneRowsWithUserInputs(_anchorSceneRowsForRendering(scene,{settled:false}),streamId);
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -18432,20 +18637,16 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
   const activityKey=`live:${streamId||S.activeStreamId||'anchor'}`;
-  // The retained group must still be LIVE: an interim_assistant boundary
-  // finalizes the group in place (closeCurrentLiveActivityGroup ->
-  // _finalizeLiveActivityDisclosureGroup strips data-live-tool-call-group and
-  // collapses it) while leaving data-anchor-scene-owner="1". Reusing that
-  // finalized group kept re-rendering into a collapsed, static frame — tools
-  // and later live prose after the boundary never appeared while the turn was
-  // still busy. Requiring the live flag makes the sweep remove the finalized
-  // group so _anchorSceneWorklogGroup builds a fresh live one (#7495 re-gate).
+  // Reuse a group only while it is still live. An interim boundary finalizes
+  // the old group before later tools/prose must appear (#7495). Receipt prose
+  // beside that live group remains part of the preserved scene.
   const retainedGroup=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-live-tool-call-group="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+  const retainedConversation=retainedGroup?.nextElementSibling?.classList.contains('anchor-conversation')?retainedGroup.nextElementSibling:null;
   blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
-    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))&&!(retainedConversation&&retainedConversation.contains(el))) el.remove();
   });
   blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
-    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))&&!(retainedConversation&&retainedConversation.contains(el))) el.remove();
   });
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
     el.classList.add('assistant-segment-worklog-source');
@@ -18479,7 +18680,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:false});
+  const rows=_liveSceneRowsWithUserInputs(_anchorSceneRowsForRendering(scene,{settled:false}),streamId);
   if(!rows.length) return false;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
@@ -18499,7 +18700,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const activeStreamId = String(streamId || S.activeStreamId || '');
   const activeSessionId = String(S.session && S.session.session_id || '');
   const preserveByKey = new Map();
-  blocks.querySelectorAll('.transparent-event-row[data-live-stream-owned="1"][data-anchor-row-id]').forEach(node=>{
+  blocks.querySelectorAll('.transparent-event-row[data-live-stream-owned="1"][data-anchor-row-id],.user-input-receipt[data-live-stream-owned="1"][data-anchor-row-id]').forEach(node=>{
     if(!node||!node.getAttribute) return;
     const rowStream = String(node.getAttribute('data-anchor-stream-id') || '');
     if(rowStream && rowStream !== activeStreamId) return;
@@ -18544,12 +18745,13 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       streamId:streamId||S.activeStreamId||'',
       sessionId:S.session&&S.session.session_id,
     };
-    const signature=_anchorSceneToolRenderSignature(row,rowOpts);
+    const signature=_anchorSceneRetainedRowSignature(row,rowOpts);
     const dataKey=_anchorSceneDataRowKey(row,activeStreamId);
     const cached=dataKey?preserveByKey.get(dataKey):null;
-    if(signature&&cached&&cached._anchorToolRenderSignature===signature){
-      // Timestamp visibility is presentation state, independent of tool content.
-      // Reconcile it in place so toggles preserve disclosure and text selection.
+    if(signature&&cached&&cached._anchorRowRenderSignature===signature){
+      // Timestamp visibility is presentation state, independent of content.
+      // Reconcile it in place so changing the setting does not rebuild rows
+      // whose disclosure state or text selection should remain intact.
       _syncTransparentEventTimestampVisibility(cached);
       preserveByKey.delete(dataKey);
       renderedRows.push(cached);
@@ -18566,9 +18768,10 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
-    if(signature) renderedNode._anchorToolRenderSignature=signature;
+    renderedNode._anchorRowRenderSignature=signature;
     renderedRows.push(renderedNode);
   }
+  preserveByKey.forEach(stale=>stale.remove());
   const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>{
     if(!node||node.parentElement!==blocks) return false;
     let next=node.nextSibling;
@@ -18589,7 +18792,6 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     else blocks.appendChild(renderedNode);
     expectedNextSibling=renderedNode;
   }
-  preserveByKey.forEach(stale=>stale.remove());
   if(renderedRows.length) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
@@ -18997,7 +19199,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const rows=_settledSceneRowsWithUserInputs(_compactSceneRowsWithPersistedUpdates(_anchorSceneRowsForRendering(scene,{settled:true}),blocks,rawIdx,{commentaryOnly:true}),String(message._anchor_stream_id||scene.stream_id||scene.identity?.stream_id||''),blocks);
   if(!rows.length) return false;
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   // The assistant segment owns the final answer; pass it so intermediate prose
@@ -19012,7 +19214,15 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   blocks.querySelectorAll('.transparent-earlier-steps[data-anchor-earlier-steps="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    const text=String(node.getAttribute('data-raw-text')||'');
+    const message=S.messages[idx];
+    const wholeText=Array.isArray(message?.content)
+      ? message.content.filter(part=>part&&part.type==='text').map(part=>part.text||part.content||'').join('\n')
+      : text;
+    if(Number.isFinite(idx)&&idx<rawIdx&&rows.some(row=>row.role==='prose'&&(
+      _anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,text)||
+      _anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,wholeText)
+    ))){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -19162,7 +19372,7 @@ function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   const scene=message&&message._anchor_activity_scene;
   const blocks=_assistantTurnBlocks(turnEl);
   if(!scene||!blocks){ if(affordanceEl) affordanceEl.remove(); return; }
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];
+  const rows=_compactSceneRowsWithPersistedUpdates(_anchorSceneRowsForRendering(scene,{settled:true})||[],blocks,rawIdx,{commentaryOnly:true});
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   const finalAnswer=String(
     (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
@@ -19429,8 +19639,9 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const disclosureKey=group.getAttribute('data-activity-disclosure-key')||'';
   const savedDisclosure=_readActivityDisclosureState(disclosureKey);
   const rows=_deferredWorklogRowsFromGroup(group);
-  if(!rows||!rows.length) return false;
-  const match=/^anchor-scene:(\d+)$/.exec(disclosureKey);
+  if(!rows) return false;
+  if(!rows.length) return !!(group.hidden&&ownerHasVisibleSegment);
+  const match=/^anchor-scene:(\d+)$/.exec(group.getAttribute('data-tool-worklog-key')||disclosureKey);
   const message=match&&S.messages&&S.messages[Number(match[1])];
   const errored=!!(message&&message._anchor_activity_scene&&
     _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
@@ -19545,11 +19756,19 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
-  if(!rows.length) return false;
+  const sceneRows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const finalAnswer=String(scene.final_answer||_assistantAnchorSceneFinalAnswerText(message)||msgContent(message)||'');
+  const lastTool=_anchorSceneLastNonTerminalWorkRowIndex(sceneRows);
+  const allRows=sceneRows.filter((row,index)=>row.role!=='prose'||(
+    !_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,finalAnswer)&&
+    !(index>lastTool&&_anchorSceneLiveTokenFinalPrefix(row,row.text,finalAnswer))
+  ));
+  const rows=_settledSceneRowsWithUserInputs(_compactSceneRowsWithPersistedUpdates(allRows,blocks,rawIdx),String(message._anchor_stream_id||scene.stream_id||scene.identity?.stream_id||''),blocks);
+  if(!allRows.length) return false;
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    const text=String(node.getAttribute('data-raw-text')||'');
+    if(Number.isFinite(idx)&&idx<rawIdx&&allRows.some(row=>row.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||row.text,text))){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -19559,8 +19778,12 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');
   const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForStreamSettle(streamId);
   const activityKey=`anchor-scene:${rawIdx}`;
-  if(streamId&&!_readActivityDisclosureState(activityKey)){
-    _copyActivityDisclosureState(`live:${streamId}`, activityKey);
+  // Storage identifies the turn; the worklog key still locates its current row.
+  // Do not migrate old index-keyed choices: pagination can give that index to
+  // another turn. Missing stream identity retains the legacy fallback.
+  const disclosureKey=streamId?`settled-stream:${streamId}`:activityKey;
+  if(streamId&&!_readActivityDisclosureState(disclosureKey)){
+    _copyActivityDisclosureState(`live:${streamId}`, disclosureKey);
   }
   // #5941: an errored turn that produced assistant content (tool calls /
   // reasoning) must not hide that content behind a collapsed header — the user
@@ -19574,7 +19797,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // explicitly collapsed THIS turn's worklog (saved 'closed' disclosure state)
   // is still respected, so the default-open never fights an intentional collapse.
   const erroredWorklogKeepOpen=_anchorSceneHasErroredTerminalState(scene)
-    && _readActivityDisclosureState(activityKey)!=='closed';
+    && _readActivityDisclosureState(disclosureKey)!=='closed';
   // keepSettledWorklogOpen forces collapsed:false for the ONE height-stable settle
   // render of the just-settled turn (no STREAM_DONE shrink jump) for both pinned
   // followers AND unpinned mid-turn readers. The keep-open is made genuinely
@@ -19587,6 +19810,9 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
     collapsed:!(keepSettledWorklogOpen||erroredWorklogKeepOpen),
+    disclosureKey,
+    restoreDisclosure:true,
+    forceOpen:keepSettledWorklogOpen,
     beforeAnchor:true,
     anchor:segment,
     activityKey,
@@ -19595,6 +19821,10 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   });
   if(!group) return false;
   group.setAttribute('data-anchor-settled-scene-owner','1');
+  // All intermediate updates and their activity remain inside Processed.
+  // Successful compression can leave prose but no supporting details.
+  group.hidden=!rows.length;
+  if(!rows.length) return true;
   // #5839: for a COLLAPSED settled worklog, defer building the row DOM until the
   // user first expands it. A reasoning-heavy turn can carry 80+ activity rows;
   // eagerly materializing them for every historical turn balloons the DOM and a
@@ -19702,7 +19932,8 @@ function ensureActivityGroup(inner, opts){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
     if(window._worklogDetailsExpandedByDefault===true) collapsed=false;
-    const savedState=_readActivityDisclosureState(activityKey);
+    const disclosureKey=opts.disclosureKey||activityKey;
+    const savedState=_readActivityDisclosureState(disclosureKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
     // state win across session switches and reloads. Saved closed-state should
@@ -19710,15 +19941,19 @@ function ensureActivityGroup(inner, opts){
     // explicitly collapsed.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
-    if(live && savedState==='open') collapsed=false;
+    if((live||opts.restoreDisclosure) && savedState==='open') collapsed=false;
     else if(live && savedState==='closed') collapsed=true;
     else if(opts.honourSavedDisclosure===true && savedState) collapsed=savedState==='closed';
+  // A one-frame settlement height guard is not the user's persisted disclosure
+  // intent: it deliberately opens the group only for that replacement frame.
+  if(opts.forceOpen) collapsed=false;
     group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
     group.setAttribute('data-tool-worklog-group','1');
+    // Worklog key addresses the current row; disclosure key stores turn intent.
     group.setAttribute('data-tool-worklog-key',activityKey||'');
-    if(activityKey) group.setAttribute('data-activity-disclosure-key',activityKey);
+    if(disclosureKey) group.setAttribute('data-activity-disclosure-key',disclosureKey);
     if(live){
       group.setAttribute('data-live-tool-worklog-group','1');
       group.setAttribute('data-live-tool-call-group','1');
@@ -19734,8 +19969,8 @@ function ensureActivityGroup(inner, opts){
       else anchor.insertAdjacentElement('afterend', group);
     }
     else inner.appendChild(group);
-  }else if(activityKey&&!group.getAttribute('data-activity-disclosure-key')){
-    group.setAttribute('data-activity-disclosure-key',activityKey);
+  }else if(disclosureKey&&!group.getAttribute('data-activity-disclosure-key')){
+    group.setAttribute('data-activity-disclosure-key',disclosureKey);
   }
   if(burstId&&!group.getAttribute('data-activity-burst-id')) group.setAttribute('data-activity-burst-id',burstId);
   if(segmentSeq&&!group.getAttribute('data-live-segment-seq')) group.setAttribute('data-live-segment-seq',segmentSeq);
@@ -19783,6 +20018,9 @@ function normalizeLiveActivityGroupPlacement(turn){
     return 0;
   });
   for(const group of groups){
+    // Anchor scenes own their group and prose together. Legacy parser anchors
+    // must not relocate or reason-mirror that retained projection on restore.
+    if(group.getAttribute('data-anchor-scene-owner')==='1') continue;
     const burstId=group.getAttribute('data-activity-burst-id')||'';
     const segmentSeq=group.getAttribute('data-live-segment-seq')||'';
     const anchor=segmentSeq
@@ -19947,6 +20185,9 @@ function closeCurrentLiveActivityGroup(){
   const turn=$('liveAssistantTurn');
   if(!turn) return;
   turn.querySelectorAll('.tool-worklog-group[data-live-tool-call-group="1"][data-live-activity-current="1"],.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
+    // The Anchor scene owns the whole running turn, not just this prose burst.
+    // Interim updates must not collapse it or strip its live ownership markers.
+    if(group.getAttribute('data-live-anchor-scene-owner')==='1') return;
     group.removeAttribute('data-live-activity-current');
     _finalizeLiveActivityDisclosureGroup(group);
   });
@@ -20853,8 +21094,31 @@ function _addMessageRenderHash(add, m){
 
 function _messageRenderCacheSignature(){
   let hash=2166136261;
+  // Live activity-burst projection intentionally spreads references to the same
+  // reasoning string across every segment. Hash each distinct long string once
+  // per invocation, while retaining a position marker for repeated occurrences:
+  // equal values are redundant content, not redundant render structure. This
+  // preserves invalidation for value/order edits and avoids O(bursts×reasoning)
+  // character visits on marathon turns. The scoped Map is discarded with the
+  // signature, so a later change is always re-read instead of memoized stale.
+  const seenLongRenderValues=new Map();
   function add(value){
     const s=String(value==null?'':value);
+    if(s.length>=256){
+      const repeatedId=seenLongRenderValues.get(s);
+      if(repeatedId!==undefined){
+        // A typed ordinal cannot collide with another repeated value, unlike a
+        // length-only marker. 0x10000+id is outside one code unit's range, so
+        // the marker cannot be forged by a single character; the shared 32-bit
+        // hash still has the base algorithm's ordinary collision limits.
+        hash^=0x10000+repeatedId;
+        hash=Math.imul(hash,16777619)>>>0;
+        hash^=31;
+        hash=Math.imul(hash,16777619)>>>0;
+        return;
+      }
+      seenLongRenderValues.set(s,seenLongRenderValues.size+1);
+    }
     for(let i=0;i<s.length;i++){
       hash^=s.charCodeAt(i);
       hash=Math.imul(hash,16777619)>>>0;
@@ -22130,6 +22394,266 @@ function _processWakeupCardHtml(info, rawText, extras){
   return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
 }
 
+// Only complete, unchanged historical turns are reusable. The live/latest
+// turn and mixed compression/handoff UI remain on the ordinary renderer path.
+function _settledTurnMemoInput(start, visible, toolCalls, renderToolIndices){
+  if(S.messages[start]&&S.messages[start]._source==='process_wakeup') return null;
+  const boundary=visible.find(entry=>entry.rawIdx>start&&(entry.m.role!=='assistant'||entry.m._source==='process_wakeup'));
+  if(!boundary) return null;
+  // Reasoning echo comparison spans adjacent assistant messages even across
+  // wakeup rows. Keep both neighboring DOM turns on the full-render path.
+  const previous=visible.findLast(entry=>entry.rawIdx<start);
+  if(boundary.m._source==='process_wakeup'||previous?.m._source==='process_wakeup') return null;
+  const end=boundary.rawIdx;
+  const messages=S.messages.slice(start,end);
+  if(messages.some(m=>m&&(m._live||m._pending||m._partial||m._liveSegmentSeq!==undefined||m._activityBurstId!==undefined))) return null;
+  const days=new Set(messages.filter(m=>m&&m.role==='assistant'&&(m._ts||m.timestamp))
+    .map(m=>new Date((m._ts||m.timestamp)*1000).toDateString()));
+  if(days.size>1) return null;
+  const session=S.session||{};
+  const toolIds=new Set();
+  let unkeyedTool=false;
+  for(const message of messages){
+    const calls=[...(message.tool_calls||[]),...(message._partial_tool_calls||[]),
+      ...(Array.isArray(message.content)?message.content.filter(part=>part&&part.type==='tool_use'):[])];
+    for(const call of calls){
+      const id=call&&(call.tid||call.id||call.tool_call_id||call.tool_use_id||call.call_id);
+      if(id) toolIds.add(id); else unkeyedTool=true;
+    }
+  }
+  // Unkeyed legacy tools use a transcript-wide name/order fallback. Keep that
+  // ambiguous path on the ordinary renderer instead of guessing its inputs.
+  if(unkeyedTool) return null;
+  const linkedResults=toolIds.size?S.messages.filter(message=>message&&(
+    (message.role==='tool'&&toolIds.has(message.tool_call_id||message.tool_use_id))||
+    (Array.isArray(message.content)&&message.content.some(part=>part&&part.type==='tool_result'&&toolIds.has(part.tool_use_id)))
+  )):[];
+  const presentation=[new Date().toDateString(),session.session_id,session.model,session.model_provider,session.profile,
+    session.read_only,session.is_read_only,
+    typeof _isBranchableReadOnlySession==='function'&&_isBranchableReadOnlySession(session),
+    session.compression_anchor_visible_idx,session.compression_anchor_message_key,session.compression_anchor_summary,
+    session.workspace,(typeof _oldestIdx==='undefined'?0:_oldestIdx)+start,
+    typeof _serverTz==='undefined'?'':_serverTz,
+    chatActivityMode(),window._showThinking,window._simplifiedToolCalling,window._showTokenUsage,
+    window._worklogDetailsExpandedByDefault,window._transparentEventTimestamps,
+    typeof assistantDisplayName==='function'?assistantDisplayName():'',
+    typeof isTpsDisplayEnabled==='function'&&isTpsDisplayEnabled()];
+  const relevant=calls=>(Array.isArray(calls)?calls:[]).filter(tc=>{
+    const rawIdx=tc&&tc.assistant_msg_idx;
+    const idx=Number(rawIdx);
+    const id=tc&&(tc.tid||tc.id||tc.tool_call_id||tc.call_id);
+    return toolIds.has(id)||rawIdx==null||rawIdx===''||!Number.isInteger(idx)||idx<0||(idx>=start&&idx<end);
+  });
+  // Settlement temporarily moves the same metadata into a different array.
+  // Compare the source the legacy renderer actually consumes, not both storage
+  // locations: moving unchanged data must not invalidate historical turns.
+  const effectiveTools=Array.isArray(S._settledLiveToolMetadata)
+    ? S._settledLiveToolMetadata : (toolCalls||S.toolCalls);
+  if(toolIds.size&&Array.isArray(effectiveTools)&&effectiveTools.length){
+    const metadataIds=new Set(effectiveTools.map(call=>call&&(call.tid||call.id||call.tool_call_id||call.call_id)));
+    if(Array.from(toolIds).some(id=>!metadataIds.has(id))) return null;
+  }
+  const turnTools=relevant(effectiveTools);
+  const persistedTools=relevant(session.tool_calls);
+  // Segment/burst routing can override assistant_msg_idx. Those legacy routes
+  // stay on the full renderer until their complete ownership can be proven.
+  if([...turnTools,...persistedTools].some(call=>call&&(call.activitySegmentSeq||call.activityBurstId))) return null;
+  const relativeTools=calls=>calls.map(call=>{
+    const idx=call&&call.assistant_msg_idx;
+    return Number.isInteger(idx)&&idx>=0?{...call,assistant_msg_idx:idx-start}:call;
+  });
+  // Badge decisions consume render-start metadata, before legacy derivation.
+  // Keep that input separate from priorToolCalls used to compare derived data.
+  const gateIndices=renderToolIndices||new Set((S.toolCalls||[]).map(call=>call?.assistant_msg_idx));
+  const toolGate=JSON.stringify(Array.from(gateIndices).filter(idx=>Number.isInteger(idx)&&idx>=start&&idx<end)
+    .map(idx=>idx-start).sort((a,b)=>a-b));
+  try{return {start,end,toolGate,base:typeof _oldestIdx==='undefined'?0:_oldestIdx,
+    signature:JSON.stringify([presentation,previous?.m,messages,linkedResults,
+      relativeTools(turnTools),relativeTools(persistedTools)])};}catch(_){return null;}
+}
+
+// Pagination moves window-relative indices, not the identity of a settled turn.
+// Legacy and scene-backed compact turns use DOM-owned disclosure handlers.
+// Transparent Stream's earlier-step closures remain on the full-render path.
+function _canRebaseSettledTurn(turn,start,visible){
+  if(!isCompactWorklogMode()) return false;
+  const previous=visible.findLast(entry=>entry.rawIdx<start);
+  if(previous?.m.role!=='user'||turn.querySelector('.transparent-event-row')) return false;
+  // Generated persisted-update rows encode indices in JSON keys and deferred
+  // data, not just attributes. Rebuild these rather than guessing at identity.
+  for(const node of turn.querySelectorAll('[data-compact-row-key],[data-compact-update-key],[data-worklog-rows-deferred]')){
+    if((node.getAttribute('data-compact-row-key')||'').includes('persisted-update:')||
+      (node.getAttribute('data-compact-update-key')||'').includes('persisted-update:')||
+      node._deferredWorklogRows?.some(row=>String(row.row_id||'').startsWith('persisted-update:'))) return false;
+  }
+  return true;
+}
+function _rebaseSettledTurn(turn,delta){
+  const keyAttrs=['data-tool-worklog-key','data-worklog-anchor-key','data-activity-disclosure-key',
+    'data-compact-update-key','data-tool-group-disclosure-key','data-thinking-key'];
+  const selector=['[data-msg-idx]','[data-recycle-key]','[data-anchor-owner-idx]','[onclick]',
+    ...keyAttrs.map(attr=>`[${attr}]`)].join(',');
+  for(const node of [turn,...turn.querySelectorAll(selector)]){
+    for(const attr of keyAttrs){
+      const key=node.getAttribute(attr)||'';
+      const match=/^((?:thinking:|update:)?(?:anchor-scene:|msg:|anchor:|assistant:))(\d+)((?::step:\d+)?)$/.exec(key);
+      if(match) node.setAttribute(attr,match[1]+(Number(match[2])+delta)+match[3]);
+    }
+    for(const attr of ['data-msg-idx','data-recycle-key','data-anchor-owner-idx']){
+      const value=node.getAttribute(attr);
+      if(value!==null&&/^-?\d+$/.test(value)&&Number.isSafeInteger(Number(value)+delta)){
+        node.setAttribute(attr,String(Number(value)+delta));
+      }
+    }
+    const action=node.getAttribute('onclick')||'';
+    const fork=/^forkFromMessage\((\d+)\)$/.exec(action);
+    const jump=/^jumpToTurnQuestion\((-?\d+),(-?\d+)\)$/.exec(action);
+    if(fork) node.setAttribute('onclick',`forkFromMessage(${Number(fork[1])+delta})`);
+    if(jump) node.setAttribute('onclick',`jumpToTurnQuestion(${Number(jump[1])<0?-1:Number(jump[1])+delta},${Number(jump[2])<0?-1:Number(jump[2])+delta})`);
+  }
+}
+
+function _adoptUserInputReceipts(session){
+  if(!S.session||session?.session_id!==S.session.session_id) return;
+  if(Array.isArray(session._user_inputs)) S.session._user_inputs=session._user_inputs;
+  S.session._user_inputs_unavailable=!!session._user_inputs_unavailable;
+}
+
+function _rememberUserInputReceipt(sid,receipt){
+  if(!S.session||S.session.session_id!==sid||!receipt?.input_id) return;
+  if(S._userInputsSessionId!==sid){S._userInputsSessionId=sid;S._userInputs=new Map();}
+  S._userInputs.set(receipt.input_id,receipt);
+  _renderUserInputReceipts();
+  _placeSettledCompactWorklogs($('msgInner'));
+}
+
+// Display-only rows: never insert these into the registry or model messages.
+function _liveSceneRowsWithUserInputs(rows,streamId){
+  const inputs=new Map();
+  for(const receipt of S.session?._user_inputs||[]) inputs.set(receipt.input_id,receipt);
+  if(S._userInputsSessionId===S.session?.session_id){
+    for(const [id,receipt] of S._userInputs||[]) inputs.set(id,receipt);
+  }
+  const pending=Array.from(inputs.values()).filter(receipt=>receipt?.input_id&&
+    receipt.stream_id===streamId&&['steer','clarify'].includes(receipt.kind)&&
+    typeof receipt.content==='string').map(receipt=>({receipt,timestamp:_anchorSceneRowTimestampSeconds(receipt)||0}))
+    .sort((a,b)=>a.timestamp-b.timestamp);
+  if(!pending.length) return rows;
+  const result=[];
+  let index=0;
+  const appendInput=receipt=>result.push({row_id:`user-input:${receipt.input_id}`,
+    role:'user_input',source_event_type:'user_input',status:'completed',receipt});
+  for(const row of rows){
+    const timestamp=_anchorSceneRowTimestampSeconds(row);
+    // Missing receipt time belongs before activity, never at the growing tail.
+    while(index<pending.length&&(!pending[index].timestamp||timestamp&&pending[index].timestamp<=timestamp)) appendInput(pending[index++].receipt);
+    result.push(row);
+  }
+  while(index<pending.length) appendInput(pending[index++].receipt);
+  return result;
+}
+
+function _userInputReceiptNode(receipt,row){
+  // Reuse a fallback row when the live scene takes ownership after reattach.
+  if(!row) row=$('msgInner')?.querySelector(`.user-input-receipt[data-user-input-id="${CSS.escape(receipt.input_id)}"]`);
+  if(!row){row=document.createElement('div');row.className='msg-row user-input-receipt';row.dataset.role='user';row.dataset.userInputId=receipt.input_id;}
+  const label=t(receipt.kind==='steer'?'user_input_steer':'user_input_answer');
+  const html=`<div class="msg-body" style="white-space:pre-wrap">${esc(receipt.content)}</div><div class="msg-foot"><span class="msg-time">${esc(label)} · ${esc(_formatMessageFooterTimestamp(receipt.timestamp))}</span></div>`;
+  if(row.innerHTML!==html) row.innerHTML=html;
+  return row;
+}
+
+// A settled disclosure belongs beside the conclusion, not before a potentially
+// hour-long sequence of visible progress updates. Move only the existing group;
+// its disclosure state, event handlers and lazily materialized rows stay owned.
+function _placeSettledCompactWorklogs(inner){
+  // Delegated transcripts deliberately interleave separate worklogs with prose.
+  if(!isCompactWorklogMode()||!inner||_isDelegatedSubagentTranscript()) return;
+  for(const turn of inner.querySelectorAll('.assistant-turn')){
+    if(turn.id==='liveAssistantTurn') continue;
+    const blocks=_assistantTurnBlocks(turn);
+    if(!blocks) continue;
+    const segments=Array.from(blocks.querySelectorAll(':scope > .assistant-segment'))
+      .filter(node=>!node.hidden&&!node.classList.contains('assistant-segment-anchor')&&!node.classList.contains('assistant-segment-worklog-source')&&node.style.display!=='none');
+    const finalSegment=segments[segments.length-1];
+    if(!finalSegment) continue;
+    let next=finalSegment;
+    const groups=Array.from(blocks.querySelectorAll(':scope > .tool-worklog-group'));
+    for(let i=groups.length-1;i>=0;i--){
+      const group=groups[i];
+      if(group.nextElementSibling!==next) next.before(group);
+      next=group;
+    }
+  }
+}
+function _renderUserInputReceipts(){
+  const inner=$('msgInner');
+  const sid=S.session?.session_id;
+  if(!inner||!sid) return;
+  if(S.session._user_inputs_unavailable&&S._userInputsWarningSessionId!==sid){
+    S._userInputsWarningSessionId=sid;
+    showToast(t('user_input_load_failed'),5000);
+  }
+  if(S._userInputsSessionId!==sid){S._userInputsSessionId=sid;S._userInputs=new Map();}
+  for(const receipt of S.session._user_inputs||[]){
+    if(receipt?.input_id) S._userInputs.set(receipt.input_id,receipt);
+  }
+  // Reproject on receipt arrival too, not only on the next SSE event. The scene
+  // owns live placement; the fallback below owns legacy/settled presentation.
+  if(S.activeStreamId&&$('liveAssistantTurn')&&Array.from(S._userInputs.values()).some(r=>r.stream_id===S.activeStreamId)){
+    _renderLiveAnchorActivitySceneForStream(S.activeStreamId,sid);
+  }
+  const liveInputs=new Map(Array.from(inner.querySelectorAll('#liveAssistantTurn .user-input-receipt[data-anchor-scene-row="1"],.tool-worklog-group .user-input-receipt[data-anchor-scene-row="1"],.user-input-receipt[data-anchor-settled-scene-row="1"]')).map(n=>[n.dataset.userInputId,n]));
+  const existing=new Map();
+  for(const node of inner.querySelectorAll('.user-input-receipt')){
+    const live=liveInputs.get(node.dataset.userInputId);
+    if(live){if(node!==live) node.remove();}
+    else existing.set(node.dataset.userInputId,node);
+  }
+  const lastByTarget=new Map();
+  const inputs=Array.from(S._userInputs.values()).sort((a,b)=>a.timestamp-b.timestamp);
+  for(const receipt of inputs){
+    if(!['steer','clarify'].includes(receipt.kind)||typeof receipt.content!=='string'||liveInputs.has(receipt.input_id)) continue;
+    // Prefer an exact run owner. Timestamp fallback covers older/hidden scenes;
+    // inputs outside the loaded history stay out until their owning turn loads.
+    let target=Array.from(inner.querySelectorAll('[data-anchor-stream-id]')).find(n=>n.getAttribute('data-anchor-stream-id')===receipt.stream_id)?.closest('.assistant-turn');
+    if(!target&&receipt.stream_id&&(S.activeStreamId||S.session.active_stream_id)===receipt.stream_id) target=$('liveAssistantTurn');
+    if(!target){
+      let start=-1,end=S.messages.length;
+      for(let i=0;i<S.messages.length;i++){
+        const m=S.messages[i];
+        if(m.role!=='user') continue;
+        const ts=Number(m._ts||m.timestamp);
+        if(ts>0&&ts<=receipt.timestamp) start=i;
+        else if(start>=0){end=i;break;}
+      }
+      if(start>=0){
+        const candidates=Array.from(inner.querySelectorAll('[data-msg-idx]')).filter(n=>Number(n.dataset.msgIdx)>=start&&Number(n.dataset.msgIdx)<end);
+        const last=candidates[candidates.length-1];
+        target=last?.closest('.assistant-turn')||last?.closest('.msg-row');
+      }
+    }
+    if(!target) continue;
+    const row=_userInputReceiptNode(receipt,existing.get(receipt.input_id));
+    const segments=target.id!=='liveAssistantTurn'
+      ? Array.from(target.querySelectorAll('.assistant-segment,.compact-ai-update[data-msg-idx]')).filter(n=>!n.classList.contains('assistant-segment-worklog-source')&&n.style.display!=='none')
+      : [];
+    const finalSegment=segments.find(node=>{
+      const message=S.messages[Number(node.dataset.msgIdx)];
+      return message&&Number(message._ts||message.timestamp)>=Number(receipt.timestamp);
+    })||segments[segments.length-1];
+    const placement=finalSegment||target;
+    const previous=lastByTarget.get(placement);
+    if(previous) previous.after(row);
+    else if(finalSegment) finalSegment.before(row);
+    else if(target.id==='liveAssistantTurn') target.before(row);
+    else target.after(row);
+    lastByTarget.set(placement,row);
+    existing.delete(receipt.input_id);
+  }
+  for(const row of existing.values()) row.remove();
+}
+
 // #2051: parse into a <template> and move the nodes instead of insertAdjacentHTML —
 // every step is idempotent, so a DOM-API wrapper (e.g. an anti-fingerprinting
 // extension) that executes the call twice cannot duplicate the block.
@@ -22214,15 +22738,18 @@ function renderMessages(options){
   // cross-channel handoff summaries; otherwise the cached transcript returns
   // before those cards can be inserted.
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
-    const renderSignature=_messageRenderCacheSignature();
-    cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey){
+      const renderSignature=_messageRenderCacheSignature();
+      cachedRenderSignature=renderSignature;
+      if(cached.signature===renderSignature){
       inner.innerHTML=cached.html;
       _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
       _rehydrateDeferredWorklogsFromCache(inner);
+      _renderUserInputReceipts();
+      _placeSettledCompactWorklogs(inner);
       if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
@@ -22240,6 +22767,7 @@ function renderMessages(options){
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
+      }
     }
   }
   // Mid-stream flicker fix (#3877): when a renderMessages() rebuild is reached
@@ -22314,6 +22842,27 @@ function renderMessages(options){
   const sessionCompressionSummary=(
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
+  const reusableTurns=new Map();
+  const reusedAssistantIdxs=new Set();
+  const reusedTurns=new Set();
+  const canMemoizeTurns=!S.busy&&!INFLIGHT[sid]&&!virtualWindow.virtualized&&!hasTransientTranscriptUi
+    &&typeof _settledTurnMemoInput==='function';
+  if(canMemoizeTurns&&options&&options.reuseSettledTurns){
+    for(const turn of Array.from(inner.children)){
+      const memo=turn._settledTurnMemo;
+      if(!memo||turn.dataset.sessionId!==sid) continue;
+      const delta=Number.isInteger(memo.base)?memo.base-_messageSessionIndexBase():0;
+      // Both cursor and payload count must describe the same raw-row prefix;
+      // if reconciliation changes that relationship, retain the full-render path.
+      if(delta&&(delta<=0||delta!==options.prependedHistory||!_canRebaseSettledTurn(turn,memo.start+delta,renderVisWithIdx))) continue;
+      const current=_settledTurnMemoInput(memo.start+delta,renderVisWithIdx,options.priorToolCalls);
+      if(current&&current.end===memo.end+delta&&current.signature===memo.signature&&(!delta||current.toolGate===memo.toolGate)){
+        if(delta) _rebaseSettledTurn(turn,delta);
+        turn._settledTurnMemo=current;
+        reusableTurns.set(current.start,{turn,memo:current});
+      }
+    }
+  }
   const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
   _recycleStash.clear();
   if(_msgNodeRecycleEnabled){
@@ -22357,7 +22906,24 @@ function renderMessages(options){
   // the live reply stops following / appears to jump backward.
   _programmaticScroll=true;
   _programmaticScrollSetAt=performance.now();
-  inner.innerHTML='';
+  const retainedTurns=new Set(Array.from(reusableTurns.values(),entry=>entry.turn));
+  if(retainedTurns.size){
+    for(const child of Array.from(inner.childNodes)){
+      if(!retainedTurns.has(child)) child.remove();
+    }
+  }else{
+    inner.innerHTML='';
+  }
+  let retainedCursor=inner.firstChild;
+  const appendRenderedNode=node=>{
+    if(node===retainedCursor){
+      retainedCursor=retainedCursor.nextSibling;
+    }else if(retainedCursor){
+      inner.insertBefore(node,retainedCursor);
+    }else{
+      inner.appendChild(node);
+    }
+  };
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
@@ -22446,7 +23012,7 @@ function renderMessages(options){
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   if(virtualWindow.virtualized&&virtualWindow.topPad>0){
-    inner.appendChild(_messageVirtualSpacer(virtualWindow.topPad,'before'));
+    appendRenderedNode(_messageVirtualSpacer(virtualWindow.topPad,'before'));
   }
   if(hasServerOlder){
     const indicator=document.createElement('button');
@@ -22456,7 +23022,7 @@ function renderMessages(options){
     indicator.textContent=serverOlderCount>0
       ? `Load earlier messages (${serverOlderCount} older)`
       : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
-    inner.appendChild(indicator);
+    appendRenderedNode(indicator);
     _wireMessageWindowLoadEarlierButton();
     // Keep the settled compacted-context card immediately visible in a long,
     // tail-loaded conversation. Put it in flow (not inside an old tool turn).
@@ -22571,6 +23137,10 @@ function renderMessages(options){
 
   const assistantSegments=new Map();
   const assistantThinking=new Map();
+  // Share only within this render: repeated live-burst reasoning is re-used at
+  // full length, while different prose still takes the normal echo-comparison
+  // path. Fresh state on every render prevents stale content across turns.
+  const thinkingEchoCache=new Map();
   const userRows=new Map();
   // Only collect tool-call assistant indices for messages that are actually
   // rendered in the current window.  S.toolCalls can grow large in long turns,
@@ -22630,7 +23200,7 @@ function renderMessages(options){
       // turn before rendering the always-visible tail so assistant segments do
       // not merge across the spacer boundary.
       currentAssistantTurn=null;
-      inner.appendChild(_messageVirtualSpacer(virtualWindow.bottomPad,'after'));
+      appendRenderedNode(_messageVirtualSpacer(virtualWindow.bottomPad,'after'));
     }
     const {m,rawIdx}=renderVisWithIdx[vi];
     const _tsSep=m._ts||m.timestamp;
@@ -22641,9 +23211,27 @@ function renderMessages(options){
         const sep=document.createElement('div');
         sep.className='msg-date-sep';
         sep.textContent=_fmtDateSep(_d);
-        inner.appendChild(sep);
+        appendRenderedNode(sep);
       }
       _prevSepKey=_key;
+    }
+    if(reusedAssistantIdxs.has(rawIdx)) continue;
+    const reusable=m.role==='assistant'&&reusableTurns.get(rawIdx);
+    if(reusable){
+      currentAssistantTurn=reusable.turn;
+      reusedTurns.add(currentAssistantTurn);
+      appendRenderedNode(currentAssistantTurn);
+      for(const entry of renderVisWithIdx){
+        if(entry.rawIdx>=reusable.memo.start&&entry.rawIdx<reusable.memo.end&&entry.m.role==='assistant'){
+          reusedAssistantIdxs.add(entry.rawIdx);
+        }
+      }
+      for(const seg of currentAssistantTurn.querySelectorAll('.assistant-segment[data-msg-idx]')){
+        const idx=Number(seg.dataset.msgIdx);
+        if(!assistantSegments.has(idx)) assistantSegments.set(idx,seg);
+      }
+      _setLatestAssistantTurnLandmark(currentAssistantTurn,reusedAssistantIdxs.has(latestRenderedAssistantRawIdx));
+      continue;
     }
     let content=m.content||'';
     let thinkingText='';
@@ -22723,7 +23311,7 @@ function renderMessages(options){
     if(!isUser&&(isCompactWorklogMode()||isTransparentStream())&&!thinkingText){
       const turnFinalVisibleContent=assistantTurnFinalVisibleContentByRawIdx.get(rawIdx)||'';
       const turnVisibleContents=assistantTurnVisibleContentByRawIdx.get(rawIdx)||[];
-      thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
+      thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents, thinkingEchoCache);
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     const nextRendered=renderVisWithIdx[vi+1];
@@ -22862,7 +23450,7 @@ function renderMessages(options){
         row._wakeupRenderedHtml=nextRowHtml;
         row.innerHTML=nextRowHtml;
       }
-      inner.appendChild(row);
+      appendRenderedNode(row);
       userRows.set(rawIdx, row);
       continue;
     }
@@ -22907,7 +23495,7 @@ function renderMessages(options){
       // typeof guard keeps renderMessages runnable in the node test harnesses that
       // extract it without this helper (they stub every collaborator by name).
       if(typeof _applyUserRowIntrinsicHeight==='function') _applyUserRowIntrinsicHeight(row, newRawText);
-      inner.appendChild(row);
+      appendRenderedNode(row);
       userRows.set(rawIdx, row);
       continue;
     }
@@ -22928,7 +23516,7 @@ function renderMessages(options){
       currentAssistantTurn.dataset.role='assistant';
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
       currentAssistantTurn.dataset.recycleKey=rawIdx;
-      inner.appendChild(currentAssistantTurn);
+      appendRenderedNode(currentAssistantTurn);
     }
     _setLatestAssistantTurnLandmark(currentAssistantTurn, !m._live&&rawIdx===latestRenderedAssistantRawIdx);
     const seg=document.createElement('div');
@@ -23167,6 +23755,39 @@ function renderMessages(options){
       const idx=Number(node.getAttribute('data-msg-idx'));
       if(Number.isFinite(idx)) anchorOwnedAssistantRawIdxs.add(idx);
     });
+    // A persisted steer splits DOM blocks, not the running assistant turn.
+    // Claim hydrated message ownership, or a live scene's tool identity plus
+    // all public prose. Equal text alone is not a cross-block ownership signal.
+    let crossedSteer=false;
+    for(let idx=rawIdx-1;idx>=0;idx--){
+      const earlier=S.messages[idx];
+      if(earlier?.role==='user'){
+        if(earlier.display_kind!=='steer') break;
+        crossedSteer=true;
+      }
+      if(!crossedSteer||earlier?.role!=='assistant') continue;
+      const prose=_assistantDisplayCommentary(earlier);
+      if(msgContent(earlier)) prose.push(msgContent(earlier));
+      const absoluteIdx=_messageSessionIndexForRawIdx(idx);
+      const rows=(Array.isArray(msg._anchor_activity_scene.activity_rows)?msg._anchor_activity_scene.activity_rows:[]).filter(row=>row&&typeof row==='object');
+      const indexed=rows.some(row=>row.group?.assistant_msg_idx===absoluteIdx);
+      const toolIds=(Array.isArray(earlier.tool_calls)?earlier.tool_calls:[]).map(tool=>tool?.id).filter(Boolean);
+      const liveOwned=toolIds.length&&toolIds.every(id=>rows.some(row=>_anchorSceneToolRowLogicalKey(row)===`call:${id}`))&&
+        prose.every(text=>rows.some(row=>row.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(row.text,text)));
+      if(indexed||liveOwned){
+        anchorOwnedAssistantRawIdxs.add(idx);
+        const source=assistantSegments.get(idx);
+        const text=msgContent(earlier);
+        if(source&&text&&(isCompactWorklogMode()||isTransparentStream())&&
+            _anchorSceneSceneHasWorklogWorthyRows(msg._anchor_activity_scene)&&
+            rows.some(row=>row.role==='prose'&&_anchorSceneProseMatchesFinalAnswer(row.text,text))){
+          source.classList.add('assistant-segment-worklog-source');
+          source.setAttribute('data-cross-steer-scene-owner',String(rawIdx));
+          source.setAttribute('aria-hidden','true');
+          source.hidden=true;
+        }
+      }
+    }
   }
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
@@ -23358,7 +23979,9 @@ function renderMessages(options){
     // regression vs master; same content-loss-on-switch class as #3668). The
     // `:not([data-live-thinking="1"])` / live-card guards below keep the active
     // turn's own live nodes from being double-built.
-    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]):not([data-event-type="tool"]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]):not([data-event-type="tool"]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>{
+      if(!reusedTurns.has(el.closest('.assistant-turn'))) el.remove();
+    });
     const byActivity = new Map();
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const _assistantAnchorForActivity=(aIdx,segmentSeq,burstId)=>{
@@ -23417,7 +24040,7 @@ function renderMessages(options){
       const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
       if(tid&&transparentOrderedToolIds.has(tid)) continue;
       const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
-      if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
+      if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const segmentSeq=normalizeToken(tc.activitySegmentSeq);
       const burstId=normalizeToken(tc.activityBurstId);
@@ -23428,7 +24051,7 @@ function renderMessages(options){
       entry.includeAnchorReason=true;
     }
     for(const aIdx of assistantThinking.keys()){
-      if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
+      if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const seg=assistantSegments.get(aIdx);
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
@@ -23438,10 +24061,10 @@ function renderMessages(options){
       if(entry.thinkingIdx===null) entry.thinkingIdx=aIdx;
     }
     for(const [aIdx,seg] of assistantSegments){
-      if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
-      if(!seg||!seg.classList||!seg.classList.contains('assistant-segment-worklog-source')) continue;
+      if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;
+      if(!seg||!seg.classList||(!seg.classList.contains('assistant-segment-worklog-source')&&!(isCompactWorklogMode()&&_assistantDisplayCommentary(S.messages[aIdx]).length))) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
-      if(!_worklogReasonHtmlFromAnchor(seg)) continue;
+      if(!_worklogReasonHtmlFromAnchor(seg)&&!(isCompactWorklogMode()&&_assistantDisplayCommentary(S.messages[aIdx]).length)) continue;
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
       const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
       const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
@@ -23471,7 +24094,7 @@ function renderMessages(options){
         const anchorParent=anchorRow.parentElement;
         const anchorReasonHtml=_worklogReasonHtmlFromAnchor(anchorRow);
         const thinkingText=thinkingIdx!==null?assistantThinking.get(thinkingIdx):'';
-        if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
+        if(!cards.length&&!anchorReasonHtml&&!thinkingText&&!(isCompactWorklogMode()&&_assistantDisplayCommentary(S.messages[aIdx]).length)) continue;
         const anchorTurn=anchorRow.closest('.assistant-turn');
         if(!anchorTurn) continue;
         // Hoisted out of the `if(!state)` block below (same expression, same
@@ -23490,7 +24113,7 @@ function renderMessages(options){
             honourSavedDisclosure:_isDelegatedSubagentTranscript(),
             anchor:anchorRow,
             beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
-            syncAnchorReason:anchorIsWorklogSource,
+            syncAnchorReason:false,
             activityKey,
             burstId:burstId||'',
             segmentSeq:segmentSeq||'',
@@ -23513,7 +24136,7 @@ function renderMessages(options){
           // that escapes the fold (the turn-final answer, an `_error` message)
           // had its text rendered both inline and inside the Worklog.
           includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml&&!!anchorIsWorklogSource,
-          thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
+          thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompareCached(thinkingText,thinkingEchoCache)}`:'',
           thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
           seenReasons:state.seenReasons,
           seenTools:state.seenTools,
@@ -23564,8 +24187,8 @@ function renderMessages(options){
           else blocks.appendChild(row);
         };
         if(event.thinkingText){
-          const _thinkKey=typeof _normalizeThinkingEchoCompare==='function'
-            ? _normalizeThinkingEchoCompare(event.thinkingText)
+          const _thinkKey=typeof _normalizeThinkingEchoCompareCached==='function'
+            ? _normalizeThinkingEchoCompareCached(event.thinkingText,thinkingEchoCache)
             : String(event.thinkingText).trim();
           let _seen=transparentSeenThinking.get(anchorTurn);
           if(!_seen){_seen=new Set();transparentSeenThinking.set(anchorTurn,_seen);}
@@ -23603,9 +24226,16 @@ function renderMessages(options){
     }
   }
   for(const [rawIdx,seg] of assistantSegments){
+    if(reusedAssistantIdxs.has(rawIdx)) continue;
     const msg=S.messages[rawIdx];
     if(msg&&msg._anchor_activity_scene){
       _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
+    }else if(seg&&isTransparentStream()&&!anchorOwnedAssistantRawIdxs.has(rawIdx)&&!msg?._live){
+      for(const [part,text] of _assistantDisplayCommentary(msg).entries()){
+        if(text.trim()===String(seg.getAttribute('data-raw-text')||'').trim()) continue;
+        const prose=_anchorSceneNodeForRow({role:'prose',text,row_id:`commentary:${rawIdx}:${part}`},{settled:true});
+        if(prose) seg.before(prose);
+      }
     }
   }
   _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);
@@ -23626,6 +24256,7 @@ function renderMessages(options){
   {
     const renderedAssistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     for(const mi of renderedAssistantIdxs){
+      if(reusedAssistantIdxs.has(mi)) continue;
       const msg=S.messages[mi]||{};
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
@@ -23896,6 +24527,15 @@ function renderMessages(options){
       }
     }
   }
+  // Restore live DOM ownership first; never build a scene just to discard it
+  // in the preservation swap above. Repaint only a surviving legacy shell.
+  if(S.busy&&S.activeStreamId&&inner.querySelector('#liveAssistantTurn')&&
+    !isLiveAnchorActivitySceneOwner(S.activeStreamId)&&chatActivityMode()!=='hide_all_activity'){
+    _renderLiveAnchorActivitySceneForStream(S.activeStreamId,S.session.session_id);
+    _restoreWorklogDetailDisclosureState(inner,worklogDetailDisclosureState);
+  }
+  _renderUserInputReceipts();
+  _placeSettledCompactWorklogs(inner);
   // Fail-safe invariant (#3875): a settled assistant turn must never render with
   // ZERO visible content. The Worklog redesign (#3401) folds intermediate
   // assistant segments into a collapsed Worklog card and hides the source segment
@@ -24016,6 +24656,19 @@ function renderMessages(options){
   }
   // Apply persisted playback speed after media nodes are rendered.
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
+  if(canMemoizeTurns){
+    for(const turn of Array.from(inner.children)){
+      if(!turn.classList.contains('assistant-turn')||turn.id==='liveAssistantTurn'||reusedTurns.has(turn)) continue;
+      if(turn.querySelector('.compression-turn,.handoff-turn,[data-live-assistant="1"]')){
+        delete turn._settledTurnMemo;
+        continue;
+      }
+      const start=Number(turn.dataset.recycleKey);
+      turn._settledTurnMemo=Number.isInteger(start)?_settledTurnMemoInput(start,renderVisWithIdx,undefined,toolCallAssistantIdxs):null;
+    }
+  }else{
+    for(const turn of Array.from(inner.children)) delete turn._settledTurnMemo;
+  }
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   // Skip caching while the just-settled keep-open token is armed: that render
@@ -24438,6 +25091,23 @@ function _syncToolRowsContainer(tools, isLiveWorklog){
   const existingGroup=tools.querySelector(':scope > .tool-worklog-tool-group,:scope > .tool-group[data-tool-worklog-tool-group="1"]');
   const wasOpen=!!(existingGroup&&existingGroup.classList&&existingGroup.classList.contains('open'));
   const rows=_directWorklogToolRows(tools);
+  if(existingGroup&&rows.length>1&&tools.classList.contains('wl-step-tools')&&
+    tools.querySelectorAll(':scope > .tool-worklog-tool-group,:scope > .tool-group').length===1){
+    // Reconcile the existing disclosure instead of detaching every historical
+    // row when one tool is appended or corrected. Selection and scroll live
+    // on these nodes; the summary alone is derived from the updated rows.
+    const body=existingGroup.querySelector('.tg-rows');
+    const label=existingGroup.querySelector('.tg-sum');
+    const icon=existingGroup.querySelector('.tg-icon');
+    if(body&&label&&icon){
+      _anchorScenePlaceChildren(body,rows);
+      const summary=_toolWorklogSummary(rows,{live:isLiveWorklog,toolCount:rows.length});
+      if(label.textContent!==summary) label.textContent=summary;
+      const iconHtml=_toolGroupIcon(rows);
+      if(icon.innerHTML!==iconHtml) icon.innerHTML=iconHtml;
+      return;
+    }
+  }
   _unwrapNestedToolGroups(tools);
   rows.forEach(row=>{ if(row.parentElement) row.remove(); });
   tools.querySelectorAll(':scope > .tool-card-row').forEach(row=>row.remove());
@@ -24597,7 +25267,8 @@ function _toolDetailLeadText(kind, tc){
   if(!target) return '';
   return target;
 }
-function buildToolCard(tc){
+function buildToolCard(tc, options){
+  const deferDetail=!!(options&&options.deferDetail);
   const row=document.createElement('div');
   row.className='tool-card-row';
   if(!row.dataset) row.dataset={};
@@ -24639,10 +25310,10 @@ function buildToolCard(tc){
   const argPreview=_formatToolArgPreview(tc&&tc.args);
   if(toolKind==='shell'||previewText===argPreview||previewText==='Completed'||previewText==='Running'||previewText==='Failed') previewText='';
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
-  const detailLeadText=hasDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
+  const detailLeadText=hasDetail&&!deferDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
   const detailLeadLabel=typeof _toolDetailLeadLabel==='function'?_toolDetailLeadLabel(toolKind):(toolKind==='shell'?'Shell':'Input');
   const detailLead=detailLeadText?`<div class="tool-card-detail-lead"><div class="tool-card-detail-lead-label">${esc(detailLeadLabel)}</div><pre>${esc(detailLeadText)}</pre></div>`:'';
-  const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
+  const argsEntries=!deferDetail&&tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
   const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
   row.innerHTML=`
     <div class="${cardClass}">
@@ -24653,7 +25324,7 @@ function buildToolCard(tc){
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
-      ${hasDetail?`<div class="tool-card-detail">
+      ${hasDetail&&!deferDetail?`<div class="tool-card-detail">
         ${detailLead}
         ${visibleArgs.length?`<div class="tool-card-args">${
           visibleArgs.map(([k,v])=>{
@@ -25027,7 +25698,7 @@ function clearLiveToolCards(){
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   if(!preserveDom){
     const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-    if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row),[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+    if(inner) inner.querySelectorAll('.anchor-conversation,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row),[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   }
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).

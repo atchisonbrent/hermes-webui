@@ -728,17 +728,45 @@ def test_forced_native_discovered_catalog_probes_nonactive_provider(monkeypatch,
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ])
     requests = network_catalog(monkeypatch, ["new-model"], failed=failed)
+
+    import hermes_cli.models as catalog_models
+
+    def owned_catalog(api_key, base_url, **kwargs):
+        # Required by the fork's selected-provider reader. The lightweight
+        # Agent shim used by this file does not install that helper by default.
+        if api_key != record.get("api_key") or kwargs.get("api_mode") != record.get("transport"):
+            raise AssertionError("catalog request left its configured connection")
+        if kwargs.get("cache_only"):
+            return None
+        requests.append((base_url.rstrip("/") + "/models", f"Bearer {api_key}"))
+        return None if failed else ["new-model"]
+
+    monkeypatch.setattr(catalog_models, "cached_fetch_api_models", owned_catalog, raising=False)
     found = group(config.get_available_models(force_refresh=True))
     expected = ["model-2", "model-10", MODEL]
     pinned = discover is False or discover == "false"
-    if not pinned and not failed:
+    if discover is True:
+        # A discovery-enabled native provider no longer merges its retired
+        # static map. Keep its explicit default separately from that map;
+        # failed discovery must not invent replacement inventory.
+        expected = ([] if failed else ["new-model"])
+        if record.get("default_model") not in expected:
+            expected.append(record.get("default_model"))
+        if failed:
+            assert found.get("models_endpoint_error") is not None
+    elif not pinned and not failed:
         expected.insert(2, "new-model")
     assert [m["id"] for m in found["models"]] == [f"@{PID}:{mid}" for mid in expected]
     assert requests == ([] if pinned else [(URL + "/models", "Bearer synthetic-owned-key")])
-    # The live endpoint shares the discovery predicate; a failed probe still
-    # returns every saved id. It always attempts the owned endpoint, even pinned.
     requests.clear()
-    expected_live = [MODEL, "model-10", "model-2"] if failed or pinned else ["new-model"]
+    if discover is True:
+        # A selected non-active provider remains explicit in the live ID so
+        # returning to this model cannot route through the ambient provider.
+        expected_live = [] if failed else [f"@{PID}:new-model"]
+    elif failed or pinned:
+        expected_live = [MODEL, "model-10", "model-2"]
+    else:
+        expected_live = ["new-model"]
     assert [m["id"] for m in live()["models"]] == expected_live
     assert requests == [(URL + "/models", "Bearer synthetic-owned-key")]
 

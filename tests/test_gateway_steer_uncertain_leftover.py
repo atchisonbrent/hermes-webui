@@ -24,6 +24,7 @@ const document={getElementById:()=>({querySelector:()=>recoveryShown&&!recovery.
 const $=()=>inp,t=x=>x,showToast=()=>{};
 const _steerTextWithPendingFiles=async x=>x,_steerOwnerIsCurrent=()=>true,_steerRestoreText=x=>x;
 const _steerFailureMessageKey=x=>x,_showSteerRecovery=()=>{recoveryShown=true};
+const _showSteerIndicator=()=>{},_steerIndicatorText=x=>x;
 const _steerClearCurrentOwnerDeadRun=()=>false,_steerOwnerStreamIsCurrent=()=>true;
 const _clearComposerDraft=(sid,text)=>{cleared.push(text)};
 let releaseApi;const apiDone=new Promise(r=>releaseApi=r);

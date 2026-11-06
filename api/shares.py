@@ -127,7 +127,7 @@ def _redact_share_paths(text: str, extra_paths) -> str:
 # 36) and 500'd share creation (#7949). _sanitize_message() already removes
 # them in _placeholder_inline_data_uris(); the branch keeps direct callers safe.
 _SHARE_MEDIA_RE = re.compile(
-    r"MEDIA:(?!https?://)([^\s\)\]>]+)"
+    r"MEDIA:[ \t]*(?!https?://)([^\s\)\]>]+)"
 )
 
 # Content-supplied inline data: URIs are never published in a public share.

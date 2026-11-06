@@ -488,6 +488,15 @@ _SAFE_SID_CHARS = frozenset(
 )
 
 
+def native_review_source(sid) -> str | None:
+    """Classify reserved IDs, including aliases, for denial; never repair IDs."""
+    if isinstance(sid, str):
+        for source in ("claude_code", "antigravity"):
+            if sid.strip().casefold().startswith(source + "_"):
+                return source
+    return None
+
+
 def is_safe_session_id(sid) -> bool:
     """Return True iff ``sid`` is a non-empty path-safe session id.
 
@@ -2478,6 +2487,10 @@ class Session:
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
+        # A case-insensitive filesystem must not turn an alias into authority
+        # over a different canonical session (including native review sidecars).
+        if data.get('session_id') != sid:
+            return None
         # #8830: exp-v0.52.621..630 left a shared legacy sidecar's share fields
         # after ``messages``, where the metadata prefix reader never sees them.
         # Only note it here: a load runs before (or without) any ownership
@@ -2561,6 +2574,8 @@ class Session:
             if not prefix:
                 return cls.load(sid)
             parsed = json.loads(prefix)
+            if 'session_id' in parsed and parsed['session_id'] != sid:
+                return None
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
@@ -7771,12 +7786,12 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def _profile_default_reasoning_effort(profile=None):
+def _profile_default_reasoning_effort(profile=None, model_id=None):
     """Return the profile reasoning preference for a newly-created session."""
     try:
         from api.profiles import get_hermes_home_for_profile
         return _cfg.effective_session_reasoning_effort(
-            None, get_hermes_home_for_profile(profile),
+            None, get_hermes_home_for_profile(profile), model_id=model_id,
         )
     except Exception:
         # Stay legacy (None) so the turn-time fallback still reads the profile
@@ -7831,7 +7846,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         workspace=workspace_path or get_last_workspace(profile=profile),
         model=effective_model,
         model_provider=effective_model_provider,
-        reasoning_effort=_profile_default_reasoning_effort(profile),
+        reasoning_effort=_profile_default_reasoning_effort(profile, model_id=effective_model),
         profile=profile,
         project_id=project_id,
         personality=None,
@@ -8740,6 +8755,8 @@ def get_session_for_file_ops(sid: str):
         # access errors. Recovery is deliberately limited to deleted paths.
         return session
     if recovered:
+        if native_review_source(sid):
+            return _ExternalSessionView(str(sid), str(workspace))
         return persist_recovered_workspace_binding(
             session,
             workspace,
@@ -10826,15 +10843,27 @@ def _all_profiles_cli_cache_key(contexts, context_cache_key, source_filter, incl
     )
 
 
+def _antigravity_sessions_cache_key() -> tuple:
+    """Shared external-source identity for enumeration and single-row lookup."""
+    try:
+        from api.antigravity_sessions import _root as antigravity_root
+        native_root = antigravity_root()
+        return (_path_cache_key(native_root), _path_stat_cache_key(native_root))
+    except (OSError, RuntimeError, ValueError):
+        logger.debug("Antigravity root resolution failed", exc_info=True)
+        return (None, None)
+
+
 def _cli_sessions_current_cache_key(*, all_profiles: bool):
     """Return the key ``get_cli_sessions()`` would use right now, or None."""
     if all_profiles:
         contexts, context_cache_key = _all_profiles_cli_contexts()
-        return _all_profiles_cli_cache_key(contexts, context_cache_key, None, True)
-    _home, _db, _profile, cache_key = _resolve_cli_sessions_context(
-        None, include_claude_code=True,
-    )
-    return cache_key
+        cache_key = _all_profiles_cli_cache_key(contexts, context_cache_key, None, True)
+    else:
+        _home, _db, _profile, cache_key = _resolve_cli_sessions_context(
+            None, include_claude_code=True,
+        )
+    return cache_key + _antigravity_sessions_cache_key()
 
 
 
@@ -11254,6 +11283,7 @@ def _load_cli_sessions_uncached(
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
+    include_antigravity: bool = True,
     _with_completeness: bool = False,
     session_ids: tuple[str, ...] | None = None,
 ) -> list | _CliSessionsLoadResult:
@@ -11275,7 +11305,14 @@ def _load_cli_sessions_uncached(
         except Exception:
             logger.debug("Claude Code session scan failed", exc_info=True)
 
-    if source_filter == CLAUDE_CODE_SOURCE:
+    if include_antigravity and source_filter in (None, 'antigravity'):
+        try:
+            from api.antigravity_sessions import list_sessions
+            cli_sessions.extend(list_sessions())
+        except Exception:
+            logger.debug("Antigravity session scan failed", exc_info=True)
+
+    if source_filter in (CLAUDE_CODE_SOURCE, 'antigravity'):
         return _result()
 
 
@@ -12394,6 +12431,7 @@ def get_cli_sessions(
         )
         if not resolve_supports_include_claude_code:
             cache_key = cache_key + (bool(include_claude_code),)
+    cache_key += _antigravity_sessions_cache_key()
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
@@ -12430,6 +12468,10 @@ def get_cli_sessions(
                     # Claude Code is global rather than profile-owned. Scan it
                     # once below so profile 0 availability cannot suppress it.
                     load_kwargs['include_claude_code'] = False
+                if _callable_accepts_keyword(_load_cli_sessions_uncached, 'include_antigravity'):
+                    # Antigravity is global rather than profile-owned. Scan it
+                    # once below so profile loops cannot duplicate it.
+                    load_kwargs['include_antigravity'] = False
                 if loader_supports_completeness:
                     load_kwargs['_with_completeness'] = True
                 try:
@@ -12467,6 +12509,27 @@ def get_cli_sessions(
                         "get_cli_sessions() Claude Code scan failed: %s",
                         _claude_err,
                     )
+            if source_filter in (None, 'antigravity'):
+                try:
+                    from api.antigravity_sessions import list_sessions
+                    merged.extend(list_sessions())
+                except Exception as _antigravity_err:
+                    logger.warning(
+                        "get_cli_sessions() Antigravity session scan failed: %s",
+                        _antigravity_err,
+                    )
+            # Native external records are profile-independent. Keep one copy
+            # when the same bridge is reached through several Hermes profiles.
+            unique = []
+            seen_external = set()
+            for row in merged:
+                if row.get('session_source') == 'external_agent' and row.get('profile') is None:
+                    identity = (row.get('source_tag'), row.get('session_id'))
+                    if identity in seen_external:
+                        continue
+                    seen_external.add(identity)
+                unique.append(row)
+            merged = unique
             return _CliSessionsLoadResult(
                 merged,
                 complete=(
@@ -12485,6 +12548,8 @@ def get_cli_sessions(
         load_kwargs: dict = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
+        if _callable_accepts_keyword(_load_cli_sessions_uncached, 'include_antigravity'):
+            load_kwargs['include_antigravity'] = True
         if loader_supports_completeness:
             load_kwargs['_with_completeness'] = True
         return _load_cli_sessions_uncached(
@@ -17004,6 +17069,9 @@ def get_cli_session_messages(sid, *, profile=None) -> list:
     continuation chain, return the stitched full transcript across all segments
     in chronological order. Returns empty list on any error.
     """
+    if str(sid or '').startswith('antigravity_'):
+        from api.antigravity_sessions import session_messages
+        return session_messages(sid)
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
     return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)

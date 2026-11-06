@@ -47,7 +47,7 @@ def test_helpers_load_before_ui_js():
 
 
 def test_helpers_are_precached_for_the_pwa_shell():
-    assert "'./static/a11y-helpers.js' + VQ" in SW_JS
+    assert "'./static/a11y-helpers.js?v=__WEBUI_VERSION__'" in SW_JS
 
 
 def test_tree_container_is_not_a_tab_stop_of_its_own():

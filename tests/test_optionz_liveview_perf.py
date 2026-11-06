@@ -715,6 +715,7 @@ def test_persisted_message_count_never_parses_the_transcript(
     def _no_full_load(*_a, **_k):
         raise AssertionError("SSE count lookup must never full-load a session")
 
+
     monkeypatch.setattr(models.Session, "load", classmethod(_no_full_load))
     monkeypatch.setattr(models.Session, "load_metadata_only", classmethod(_no_full_load))
     full_reads = {"n": 0}

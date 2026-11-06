@@ -12,8 +12,9 @@ import errno
 import io
 import gzip
 import json
-from api.sse_chunked import end_sse_headers
 import logging
+from api.sse_chunked import end_sse_headers
+import math
 import mimetypes
 import os
 import queue
@@ -72,6 +73,8 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
+from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.models import native_review_source
 from api.shares import (
     build_share_snapshot,
     load_share,
@@ -1176,7 +1179,7 @@ def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
     }
     # Profile-less external-agent rows that live outside the Hermes profile tree.
     # Claude Code: scanned from ~/.claude/projects; Codex: scanned from ~/.codex/
-    profile_agnostic_sources = {CLAUDE_CODE_SOURCE}
+    profile_agnostic_sources = {CLAUDE_CODE_SOURCE, 'antigravity'}
     try:
         from api.codex_sessions import CODEX_SOURCE
         profile_agnostic_sources.add(CODEX_SOURCE)
@@ -4011,6 +4014,7 @@ from api.config import (
     _load_yaml_config_file,
     _load_yaml_config_file_raw,
     _has_env_ref,
+    _preserve_env_ref,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -5691,6 +5695,12 @@ def _anchor_scene_final_answer_text(message) -> str:
 def _anchor_scene_message_reasoning_text(message) -> str:
     if not isinstance(message, dict):
         return ""
+    projected = message.get("display_reasoning")
+    if isinstance(projected, str) and (projected.strip() or any(
+        isinstance(message.get(key), str) and message[key].strip()
+        for key in ("reasoning", "reasoning_content", "reasoning_details")
+    )):
+        return projected
     for key in ("reasoning", "_reasoning", "reasoning_content", "thinking"):
         value = message.get(key)
         if not value:
@@ -6289,6 +6299,9 @@ def _anchor_scene_row_key(row) -> str:
             or row.get("row_id")
             or ""
         )
+    if row.get("role") == "prose" and row.get("source_event_type") == "settled_commentary":
+        group = row.get("group") if isinstance(row.get("group"), dict) else {}
+        return f"commentary:{group.get('assistant_msg_idx')}:{row.get('commentary_index')}"
     if row.get("role") in ("prose", "thinking"):
         durable_identity = _anchor_scene_row_durable_identity(row)
         if durable_identity:
@@ -6379,7 +6392,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     turn_start = -1
     for idx in range(local_final_idx - 1, -1, -1):
         message = messages[idx]
-        if isinstance(message, dict) and message.get("role") == "user":
+        if isinstance(message, dict) and message.get("role") == "user" and message.get("display_kind") != "steer":
             turn_start = idx
             break
     message_final_answer = _anchor_scene_final_answer_text(final_message)
@@ -6563,6 +6576,9 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         if (
             row.get("role") in ("prose", "thinking")
             and not durable_identity
+            # Projected commentary is keyed by message/part below, not text:
+            # equal updates from distinct assistant messages must both survive.
+            and row.get("source_event_type") != "settled_commentary"
             and _anchor_scene_row_text_overlaps_existing(
                 text_key,
                 seen_text_keys,
@@ -6642,6 +6658,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                 )
 
     order = 0
+    commentary_mirrors = {}
     content_tool_indexes_by_idx = {}
     used_content_tool_indexes_by_idx = {}
     id_flexible_content_tool_indexes_by_idx = {}
@@ -6650,6 +6667,27 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         absolute_idx = int(message_offset or 0) + local_idx
+        commentary = message.get("display_commentary")
+        commentary = [text for text in commentary if isinstance(text, str) and text.strip()] if isinstance(commentary, list) else []
+        if commentary:
+            # Thinking belongs beneath this update, not beneath the next one.
+            reasoning = _anchor_scene_message_reasoning_text(message)
+            if _anchor_scene_clean_text(reasoning):
+                push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
+                order += 1
+            for part, text in enumerate(commentary):
+                row = _anchor_scene_prose_row(text, order, absolute_idx, stream_id)
+                row["source_event_type"] = "settled_commentary"
+                row["commentary_index"] = part
+                row["created_at"] = message.get("_ts") or message.get("timestamp")
+                push(row)
+                key = _anchor_scene_text_key(text)
+                commentary_mirrors[key] = commentary_mirrors.get(key, 0) + 1
+                order += 1
+            if len(commentary) > 1:
+                # The agent's non-streaming fallback delivers one joined update.
+                key = _anchor_scene_text_key("\n\n".join(commentary))
+                commentary_mirrors[key] = commentary_mirrors.get(key, 0) + 1
         text = _anchor_scene_message_text(message)
         content_rows = _anchor_scene_content_rows(
             message,
@@ -6684,20 +6722,21 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         elif _anchor_scene_clean_text(text):
             push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
             order += 1
-        reasoning = _anchor_scene_message_reasoning_text(message)
-        if not content_rows:
-            reasoning = transcript_reasoning_slots.get((local_idx, 0), reasoning)
-        if (
-            _anchor_scene_clean_text(reasoning)
-            and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text)
-        ):
-            replacements = reasoning_replacements.get((local_idx, 0))
-            if replacements:
-                for replacement in replacements:
-                    push(replacement)
-            else:
-                push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
-            order += 1
+        if not commentary:
+            reasoning = _anchor_scene_message_reasoning_text(message)
+            if not content_rows:
+                reasoning = transcript_reasoning_slots.get((local_idx, 0), reasoning)
+            if (
+                _anchor_scene_clean_text(reasoning)
+                and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text)
+            ):
+                replacements = reasoning_replacements.get((local_idx, 0))
+                if replacements:
+                    for replacement in replacements:
+                        push(replacement)
+                else:
+                    push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
+                order += 1
         for key in ("tool_calls", "_partial_tool_calls"):
             calls = message.get(key)
             if isinstance(calls, list):
@@ -6777,6 +6816,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         order += 1
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") != "terminal":
+            key = _anchor_scene_text_key(row.get("text"))
+            if (row.get("role") == "prose" and row.get("source_event_type") != "settled_commentary"
+                    and commentary_mirrors.get(key, 0)):
+                commentary_mirrors[key] -= 1
+                continue
             push(row)
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") == "terminal":
@@ -6964,6 +7008,8 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         KeyError: session not found in any store
         PermissionError: session is read-only (messaging/Claude Code)
     """
+    if _external_review_identity(sid):
+        raise PermissionError("read-only external review session")
     try:
         s = get_session(sid)
         s = _ensure_full_session_before_mutation(sid, s)
@@ -7234,6 +7280,10 @@ def _build_share_metadata_sidecar(
     return session
 
 
+class NativeReviewShareDenied(PermissionError):
+    """The native projection namespace cannot own a public share."""
+
+
 def _resolve_share_session_pair(sid: str, handler):
     """Resolve a shareable session plus the sidecar that stores share metadata.
 
@@ -7243,6 +7293,8 @@ def _resolve_share_session_pair(sid: str, handler):
     share_token/share_created_at persistence; it may be absent for pure external
     sessions that have not yet created local metadata.
     """
+    if str(sid).startswith("antigravity_"):
+        raise NativeReviewShareDenied("Native review projections cannot be publicly shared")
     try:
         stored_session = get_session(sid)
         cli_meta = (
@@ -10587,11 +10639,12 @@ def _should_accept_session_context_length_refresh(
     return model_changed or not (resolved == 256_000 and persisted > resolved)
 
 
-def _rescale_threshold_tokens_for_context_window(
+def _observed_threshold_tokens_for_context_window(
     threshold: int,
     old_window: int,
     new_window: int,
 ) -> int:
+    """Keep an observed runtime trigger; display metadata cannot rescale policy."""
     try:
         threshold = int(threshold or 0)
         old_window = int(old_window or 0)
@@ -10600,7 +10653,7 @@ def _rescale_threshold_tokens_for_context_window(
         return 0
     if threshold <= 0 or old_window <= 0 or new_window <= 0:
         return 0
-    return max(1, int(threshold * new_window / old_window))
+    return threshold
 
 
 def _worktree_default_from_config(profile: str | None) -> bool:
@@ -10718,6 +10771,15 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _external_review_identity(session_id: str) -> dict:
+    """Native external identities never become writable when discovery fails."""
+    for source, label in (("claude_code", "Claude Code"), ("antigravity", "Antigravity")):
+        if native_review_source(session_id) == source:
+            return {"session_id": session_id, "source_tag": source, "raw_source": source,
+                    "source_label": label, "session_source": "external_agent",
+                    "profile": None, "is_cli_session": True, "read_only": True,
+                    "can_resume": False}
+    return {}
 # Sources kept out of the default projection with no bounded pass of their own.
 # A session the user explicitly opens from one of them is resolved by id, so it
 # stays reachable however many newer runs exist (#8265 review on #8349).
@@ -10737,6 +10799,7 @@ _CLI_LOOKUP_FALLBACK_SOURCES = tuple(
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
     if not session_id:
         return {}
+    identity = _external_review_identity(session_id)
     # perf: this runs on hot request paths (/api/session/import_cli,
     # /api/git-info) and used to enumerate EVERY CLI session through
     # get_cli_sessions() — a whole-state.db projection that costs seconds when
@@ -10755,16 +10818,20 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
     # fast path is an optimisation, not a second source of truth (#8412 review:
     # git-info answered 404 for a session the enumeration did return).
     try:
+        if identity.get("source_tag") == "antigravity":
+            from api.antigravity_sessions import session_metadata
+            return {**(session_metadata(session_id) or {}), **identity}
         for row in get_cli_sessions(all_profiles=all_profiles):
             if row.get("session_id") == session_id:
+                return {**row, **identity}
                 return row
         for source in _CLI_LOOKUP_FALLBACK_SOURCES:
             row = get_cli_session_by_id(session_id, source, all_profiles=all_profiles)
             if row:
                 return row
     except Exception:
-        return {}
-    return {}
+        pass
+    return identity
 
 
 def _session_index_marks_was_webui(sid: str) -> bool:
@@ -10987,7 +11054,7 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     # caller, but it is exported in the return tuple and may surface
     # in a future log / user-visible diagnostic.
     cli_meta_source_tag = (cm.get("source_tag") or cm.get("raw_source") or "").strip().lower()
-    if cli_meta_source_tag in {"claude_code", "cron", "external_agent",
+    if cli_meta_source_tag in {"claude_code", "antigravity", "cron", "external_agent",
                                 "gateway", "messaging", "subagent", "unknown"}:
         # gateway/unknown are the platformless gateway fallbacks
         # (gateway/run.py, gateway/slash_commands.py) — they own the
@@ -11006,7 +11073,7 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     # to state.db's source column.  Refuse known-foreign state.db sources.
     if not cli_meta_source_tag and state_db_source:
         state_db_source_tag = state_db_source.strip().lower()
-        if state_db_source_tag in {"claude_code", "cron", "messaging",
+        if state_db_source_tag in {"claude_code", "antigravity", "cron", "messaging",
                                     "external_agent", "gateway", "subagent", "unknown"}:
             return False, f"state_db_source={state_db_source_tag}"
     return True, ""
@@ -11143,6 +11210,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         return None, "was_webui"
     if cli_meta is None:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
+    cli_meta = {**cli_meta, **_external_review_identity(sid)}
     msgs = get_cli_session_messages(sid)
     if not msgs:
         return None, "no_foreign_state"
@@ -11297,6 +11365,8 @@ def _load_branch_source_or_refuse(handler, sid: str):
 
 def _resolve_cli_import_metadata(session_id: str, *, requested_profile=None, allow_all_profiles: bool = False) -> dict:
     cli_meta = _lookup_cli_session_metadata(session_id)
+    if _external_review_identity(session_id):
+        return {**cli_meta, **_external_review_identity(session_id)}
     if cli_meta and (not requested_profile or _profiles_match(cli_meta.get("profile"), requested_profile)):
         return cli_meta
     if not allow_all_profiles:
@@ -11563,6 +11633,34 @@ def _tool_result_matches_call_ids(message, call_ids) -> bool:
         return False
     tid = message.get("tool_call_id") or message.get("tool_use_id") or ""
     return bool(tid) and str(tid) in call_ids
+
+
+def _active_turn_display_boundary(session, messages):
+    """Project the exact pending user identity into merged display coordinates.
+
+    Do not guess from text or a time range: repeated prompts are separate turns.
+    The exact timestamp is a best-effort fallback for rows without the eager
+    token. Rounded, ambiguous or missing identities leave legacy recovery intact.
+    """
+    from api.process_event_utils import build_active_turn_token
+
+    stream_id = getattr(session, "active_stream_id", None)
+    started = getattr(session, "pending_started_at", None)
+    if isinstance(started, bool):
+        return None
+    token = build_active_turn_token(stream_id, started)
+    if not token:
+        return None
+    users = [(i, row) for i, row in enumerate(messages or [])
+             if isinstance(row, dict) and row.get("role") == "user"]
+    exact = [(i, row) for i, row in users if row.get("_active_turn_token") == token]
+    if not exact:
+        exact = [(i, row) for i, row in users
+                 if not isinstance(row.get("timestamp"), bool)
+                 and row.get("timestamp") == float(started)]
+    if len(exact) != 1 or exact[0][0] != users[-1][0]:
+        return None
+    return {"stream_id": stream_id, "user_index": exact[0][0]}
 
 
 def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
@@ -13376,13 +13474,16 @@ def _cap_recent_cli_sessions(
         # (2026-09-24 re-gate reproduction: 11 projects x 20 sessions, all 20
         # newest in one project, ``p0-19`` vanished from the payload).
         reserved: set[int] = set()
-        seen_cli = 0
+        seen_cli = {"cli": 0, "antigravity": 0}
         for index, session in enumerate(sessions):
             if not _is_cli_session_for_settings(session):
                 continue
-            if seen_cli >= cli_cap:
-                break
-            seen_cli += 1
+            group = "antigravity" if "antigravity" in (
+                session.get("source_tag"), session.get("raw_source")
+            ) else "cli"
+            if seen_cli[group] >= cli_cap:
+                continue
+            seen_cli[group] += 1
             reserved.add(index)
         # The reserved rows have already been paid for by the recent window;
         # draw the remaining budget over the queues MINUS those rows, so the
@@ -13401,24 +13502,27 @@ def _cap_recent_cli_sessions(
     else:
         drawn = None if project_cap <= 0 else set()
     kept = []
-    recent_seen = 0
-    unassigned_seen = 0
+    recent_seen = {"cli": 0, "antigravity": 0}
+    unassigned_seen = {"cli": 0, "antigravity": 0}
     for index, session in enumerate(sessions):
         if _is_cli_session_for_settings(session):
+            group = "antigravity" if "antigravity" in (
+                session.get("source_tag"), session.get("raw_source")
+            ) else "cli"
             project_id = str(session.get("project_id") or "").strip()
             if not project_id:
-                unassigned_seen += 1
-                if unassigned_seen > cli_cap:
+                unassigned_seen[group] += 1
+                if unassigned_seen[group] > cli_cap:
                     continue
-                recent_seen += 1
+                recent_seen[group] += 1
             else:
                 if drawn is not None and index not in drawn:
                     continue
-                if recent_seen >= cli_cap:
+                if recent_seen[group] >= cli_cap:
                     session = dict(session)
                     session["default_hidden"] = True
                 else:
-                    recent_seen += 1
+                    recent_seen[group] += 1
         kept.append(session)
     return kept
 
@@ -15053,6 +15157,23 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
     return True
 
 
+def _insights_agent_model_usage(db_path, cutoff: float):
+    """Return Agent-ledger model usage through its public read-only API.
+
+    ``session_model_usage`` is the authoritative per-route accounting ledger.
+    Reuse Agent's reconciliation so model switches, auxiliary calls, stored
+    costs, and legacy residuals have the same meaning in CLI and WebUI Insights.
+    """
+    from agent.insights import InsightsEngine  # type: ignore[import-not-found]
+    from hermes_state import SessionDB  # type: ignore[import-not-found]
+
+    db = SessionDB(db_path=db_path, read_only=True)
+    try:
+        return InsightsEngine(db).get_model_usage_breakdown(cutoff=cutoff)
+    finally:
+        db.close()
+
+
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
@@ -15465,6 +15586,10 @@ def _handle_insights(handler, parsed) -> bool:
     total_cache_read_tokens = 0
     total_cost = 0.0
     model_stats: dict[str, dict] = {}
+    population_session_ids: set[str] = set()
+    population_is_exact = True
+    webui_fallback_by_id: dict[str, dict] = {}
+    state_route_ids: set[str] = set()
     daily_tokens: dict[str, dict] = {}
     # Activity by day of week (0=Mon .. 6=Sun)
     dow_activity = collections.Counter()
@@ -15472,10 +15597,36 @@ def _handle_insights(handler, parsed) -> bool:
     hod_activity = collections.Counter()
 
     for s in sessions_data:
+        session_id = s.get("session_id")
+        if (
+            isinstance(session_id, str)
+            and session_id
+            and session_id not in population_session_ids
+        ):
+            population_session_ids.add(session_id)
+        else:
+            population_is_exact = False
         input_tokens = _safe_usage_int(s.get("input_tokens"))
         output_tokens = _safe_usage_int(s.get("output_tokens"))
         cache_read_tokens = _safe_usage_int(s.get("cache_read_tokens"))
         cost_value = _safe_cost_float(s.get("estimated_cost"))
+        if isinstance(session_id, str) and session_id:
+            fallback_ts = _session_usage_ts(s)
+            fallback_day = (
+                _time.strftime("%Y-%m-%d", _time.localtime(fallback_ts))
+                if fallback_ts else None
+            )
+            webui_fallback_by_id[session_id] = {
+                "model": s.get("model") or "unknown",
+                "sessions": 1,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cost": cost_value,
+                "messages": _safe_usage_int(s.get("message_count")),
+                "date": fallback_day,
+                "timestamp": fallback_ts,
+            }
         total_messages += _safe_usage_int(s.get("message_count"))
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
@@ -15520,6 +15671,7 @@ def _handle_insights(handler, parsed) -> bool:
                 pass
 
     # ── Also include CLI sessions from Hermes state.db ─────────────────────
+    db_path = None
     try:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
@@ -15554,6 +15706,48 @@ def _handle_insights(handler, parsed) -> bool:
                       AND COALESCE(source, '') != 'webui'
                 """, (cutoff, end_cutoff))
                 for row in cur.fetchall():
+                    row_id = row["id"]
+                    if not isinstance(row_id, str) or not row_id:
+                        population_is_exact = False
+                    elif row_id in population_session_ids:
+                        # Identity, not source labeling, is the deduplication
+                        # boundary. Replace the compact index contribution with
+                        # the state row so fallback remains state-authoritative.
+                        state_route_ids.add(row_id)
+                        fallback = webui_fallback_by_id[row_id]
+                        total_sessions -= 1
+                        total_messages -= fallback["messages"]
+                        total_input_tokens -= fallback["input_tokens"]
+                        total_output_tokens -= fallback["output_tokens"]
+                        total_cache_read_tokens -= fallback["cache_read_tokens"]
+                        total_cost -= fallback["cost"]
+                        old_model = model_stats[fallback["model"]]
+                        for key in (
+                            "sessions", "input_tokens", "output_tokens",
+                            "cache_read_tokens", "cost",
+                        ):
+                            old_model[key] -= fallback[key]
+                        if not old_model["sessions"]:
+                            model_stats.pop(fallback["model"])
+                        fallback_day = fallback["date"]
+                        if fallback_day and fallback_day in daily_tokens:
+                            old_day = daily_tokens[fallback_day]
+                            for key in (
+                                "sessions", "input_tokens", "output_tokens",
+                                "cache_read_tokens", "cost",
+                            ):
+                                old_day[key] -= fallback[key]
+                            if not old_day["sessions"]:
+                                daily_tokens.pop(fallback_day)
+                        if fallback["timestamp"]:
+                            fallback_dt = _time.localtime(fallback["timestamp"])
+                            dow_activity[fallback_dt.tm_wday] -= 1
+                            hod_activity[fallback_dt.tm_hour] -= 1
+                    else:
+                        population_session_ids.add(row_id)
+                        state_route_ids.add(row_id)
+                    _input = _safe_usage_int(row["input_tokens"])
+                    _output = _safe_usage_int(row["output_tokens"])
                     _cache_read = _safe_usage_int(row["cache_read_tokens"])
                     # state.db input_tokens is uncached input only, while WebUI
                     # sessions store the full prompt. Add the cache tokens so
@@ -15607,6 +15801,206 @@ def _handle_insights(handler, parsed) -> bool:
                         hod_activity[_dt.tm_hour] += 1
     except Exception:
         logger.debug("Failed to include CLI sessions in insights", exc_info=True)
+
+    # The compact WebUI index predates per-model accounting and can contain a
+    # stale zero cost plus a provider-qualified alias. Adopt Agent reconciliation
+    # only when its public contract proves exact population and accounting parity.
+    # Any mismatch preserves the complete compatibility result above atomically.
+    try:
+        if db_path and db_path.exists():
+            agent_usage = _insights_agent_model_usage(db_path, cutoff)
+            if not isinstance(agent_usage, dict):
+                raise ValueError("invalid Agent usage payload")
+
+            session_ids = agent_usage.get("session_ids")
+            ledger_session_ids = agent_usage.get("ledger_session_ids")
+            agent_models = agent_usage.get("models")
+            agent_daily = agent_usage.get("daily")
+            agent_totals = agent_usage.get("totals")
+
+            def _validated_ids(value, label: str) -> list[str]:
+                if not isinstance(value, list) or not all(
+                    isinstance(item, str) and item for item in value
+                ):
+                    raise ValueError(f"invalid Agent {label}")
+                if len(set(value)) != len(value):
+                    raise ValueError(f"duplicate Agent {label}")
+                return value
+
+            def _validated_count(value, label: str) -> int:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"invalid Agent {label}")
+                return value
+
+            def _validated_cost(value, label: str) -> float:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"invalid Agent {label}")
+                result = float(value)
+                if not math.isfinite(result) or result < 0:
+                    raise ValueError(f"invalid Agent {label}")
+                return result
+
+            covered_ids = set(_validated_ids(session_ids, "session coverage"))
+            if (
+                not population_is_exact
+                or not covered_ids
+                or not covered_ids.issubset(population_session_ids)
+                or not state_route_ids.issubset(covered_ids)
+                or len(population_session_ids) != total_sessions
+            ):
+                raise ValueError("Agent and endpoint populations differ")
+            uncovered_ids = population_session_ids - covered_ids
+            if not uncovered_ids.issubset(webui_fallback_by_id):
+                raise ValueError("Agent omitted a non-WebUI-index session")
+            if agent_usage.get("cutoff") != cutoff:
+                raise ValueError("Agent cutoff mismatch")
+
+            ledger_ids = _validated_ids(
+                ledger_session_ids, "ledger session coverage"
+            )
+            if not ledger_ids or not set(ledger_ids).issubset(covered_ids):
+                raise ValueError("Agent model ledger did not contribute")
+            if not isinstance(agent_models, list) or not agent_models:
+                raise ValueError("invalid Agent model breakdown")
+            if not isinstance(agent_daily, list) or not agent_daily:
+                raise ValueError("invalid Agent daily breakdown")
+            if not isinstance(agent_totals, dict):
+                raise ValueError("invalid Agent totals")
+
+            count_keys = ("input_tokens", "output_tokens", "cache_read_tokens")
+            candidate_stats: dict[str, dict] = {}
+            model_accounted_ids: set[str] = set()
+            model_sums = {**{key: 0 for key in count_keys}, "cost": 0.0}
+            for row in agent_models:
+                if not isinstance(row, dict):
+                    raise ValueError("invalid Agent model row")
+                model = row.get("model")
+                if not isinstance(model, str) or not model or model in candidate_stats:
+                    raise ValueError("invalid or duplicate Agent model")
+                row_ids = _validated_ids(row.get("session_ids"), "model sessions")
+                if not set(row_ids).issubset(covered_ids):
+                    raise ValueError("Agent model accounts for unknown session")
+                sessions = _validated_count(row.get("sessions"), "model sessions")
+                if sessions != len(row_ids):
+                    raise ValueError("Agent model session count mismatch")
+                values: dict[str, int | float] = {"sessions": sessions}
+                for key in count_keys:
+                    values[key] = _validated_count(row.get(key), f"model {key}")
+                    model_sums[key] += values[key]
+                values["cost"] = _validated_cost(row.get("cost"), "model cost")
+                model_sums["cost"] += values["cost"]
+                candidate_stats[model] = values
+                model_accounted_ids.update(row_ids)
+            if model_accounted_ids != covered_ids:
+                raise ValueError("Agent model rows do not cover every session")
+
+            candidate_daily: dict[str, dict] = {}
+            rendered_days = {
+                _time.strftime(
+                    "%Y-%m-%d", _time.localtime(first_day_ts + int(i * _timedelta(days=1).total_seconds()))
+                )
+                for i in range(days)
+            }
+            daily_accounted_ids: set[str] = set()
+            daily_sums = {**{key: 0 for key in count_keys}, "cost": 0.0}
+            for row in agent_daily:
+                if not isinstance(row, dict):
+                    raise ValueError("invalid Agent daily row")
+                day = row.get("date")
+                if (
+                    not isinstance(day, str)
+                    or not day
+                    or day not in rendered_days
+                    or day in candidate_daily
+                ):
+                    raise ValueError("invalid, out-of-window, or duplicate Agent date")
+                row_ids = _validated_ids(row.get("session_ids"), "daily sessions")
+                row_id_set = set(row_ids)
+                if (
+                    not row_id_set.issubset(covered_ids)
+                    or row_id_set & daily_accounted_ids
+                ):
+                    raise ValueError("Agent daily session coverage mismatch")
+                sessions = _validated_count(row.get("sessions"), "daily sessions")
+                if sessions != len(row_ids):
+                    raise ValueError("Agent daily session count mismatch")
+                values: dict[str, int | float] = {"sessions": sessions}
+                for key in count_keys:
+                    values[key] = _validated_count(row.get(key), f"daily {key}")
+                    daily_sums[key] += values[key]
+                values["cost"] = _validated_cost(row.get("cost"), "daily cost")
+                daily_sums["cost"] += values["cost"]
+                candidate_daily[day] = values
+                daily_accounted_ids.update(row_id_set)
+            if daily_accounted_ids != covered_ids:
+                raise ValueError("Agent daily rows do not cover every session")
+
+            validated_totals = {}
+            for key in count_keys:
+                validated_totals[key] = _validated_count(
+                    agent_totals.get(key), f"total {key}"
+                )
+                if (
+                    model_sums[key] != validated_totals[key]
+                    or daily_sums[key] != validated_totals[key]
+                ):
+                    raise ValueError(f"Agent {key} totals disagree")
+            validated_totals["cost"] = _validated_cost(
+                agent_totals.get("cost"), "total cost"
+            )
+            if not (
+                math.isclose(
+                    model_sums["cost"], validated_totals["cost"],
+                    rel_tol=1e-9, abs_tol=1e-9,
+                )
+                and math.isclose(
+                    daily_sums["cost"], validated_totals["cost"],
+                    rel_tol=1e-9, abs_tol=1e-9,
+                )
+            ):
+                raise ValueError("Agent cost totals disagree")
+
+            for session_id in uncovered_ids:
+                residual = webui_fallback_by_id[session_id]
+                day = residual.get("date")
+                if (
+                    not isinstance(day, str)
+                    or not day
+                    or day not in rendered_days
+                ):
+                    raise ValueError("WebUI residual has no in-window usage date")
+                model = residual["model"]
+                model_values = candidate_stats.setdefault(model, {
+                    "sessions": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cost": 0.0,
+                })
+                day_values = candidate_daily.setdefault(day, {
+                    "sessions": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cost": 0.0,
+                })
+                for key in ("sessions", *count_keys):
+                    model_values[key] += residual[key]
+                    day_values[key] += residual[key]
+                model_values["cost"] += residual["cost"]
+                day_values["cost"] += residual["cost"]
+                for key in count_keys:
+                    validated_totals[key] += residual[key]
+                validated_totals["cost"] += residual["cost"]
+
+            model_stats = candidate_stats
+            daily_tokens = candidate_daily
+            total_input_tokens = validated_totals["input_tokens"]
+            total_output_tokens = validated_totals["output_tokens"]
+            total_cache_read_tokens = validated_totals["cache_read_tokens"]
+            total_cost = validated_totals["cost"]
+    except Exception:
+        logger.debug("Failed to use Agent model ledger in insights", exc_info=True)
 
     # Build model breakdown
     total_tokens = total_input_tokens + total_output_tokens
@@ -16109,10 +16503,24 @@ def _run_lifecycle_health() -> dict:
             runs.append(item)
         last_finished = _live_config.LAST_RUN_FINISHED_AT
     runs.sort(key=lambda item: float(item.get("started_at") or 0.0))
+    with _live_config.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        deferred = sum(len(entries) for entries in _live_config.DEFERRED_PROCESS_WAKEUPS.values())
+    with _DEFERRED_WAKEUP_RETRY_TIMERS_LOCK:
+        retries = len(_DEFERRED_WAKEUP_RETRY_TIMERS)
+    from api import background_process as _background
+    with _background._ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        delegation_admissions = len(_background._ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT)
+    wakeup_threads = sum(thread.name.startswith(('hermes-webui-process-wakeup-', 'hermes-webui-delegation-wakeup-'))
+                         for thread in threading.enumerate())
     payload = {
         "active_runs": len(runs),
         "runs": runs,
         "last_run_finished_at": last_finished,
+        "pid": os.getpid(),
+        "restart_draining": _live_config.restart_drain_active(),
+        "pending_wakeups": {"deferred_entries": deferred, "retry_records": retries,
+                            "completion_markers": len(_live_config.PENDING_BG_TASK_COMPLETIONS),
+                            "wakeup_threads": wakeup_threads, "delegation_admissions": delegation_admissions},
     }
     if runs:
         payload["oldest_run_age_seconds"] = runs[0].get("age_seconds", 0.0)
@@ -16215,6 +16623,10 @@ def _handle_health(handler, parsed):
         "last_run_finished_at": run_check.get("last_run_finished_at"),
         "server_started_at": SERVER_START_TIME,
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
+        "restart_drain_supported": True,
+        "pid": run_check.get("pid"),
+        "restart_draining": run_check.get("restart_draining"),
+        "pending_wakeups": run_check.get("pending_wakeups"),
         "accept_loop": _accept_loop_health(handler),
     }
     if "oldest_run_age_seconds" in run_check:
@@ -16593,41 +17005,44 @@ def _save_saved_prompts(prompts: list) -> None:
     p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# In-process cache for the app-shell template. The `/`, `/index.html`, and
-# `/session/<id>` routes are the hottest navigations and each re-read the
-# ~190 KB static/index.html from disk and re-ran the two process-constant
-# substitutions (__WEBUI_VERSION__, __MAX_UPLOAD_BYTES__) on every request.
-# Those values are fixed for the process lifetime, so we cache the partially
-# rendered template here, keyed by (size, nanosecond mtime) exactly like
-# _STATIC_CACHE so a redeploy is picked up without a restart. The two values
-# that genuinely vary per request — the per-session CSRF token and the runtime
-# extension tags (inject_extension_tags) — are still applied on each request
-# against the cached base, so caching changes no observable output.
+# Cache the shell source and its rendered base separately. Asset bytes may
+# change while index.html and the process's Git version remain unchanged.
+# CSRF tokens and extension tags remain per-request, outside this shared cache.
 _INDEX_SHELL_CACHE: dict = {}
 _INDEX_SHELL_CACHE_LOCK = threading.Lock()
 
 
 def _render_index_shell_base() -> str:
-    """Return static/index.html with the process-constant tokens substituted.
-
-    Cached and invalidated on (size, mtime_ns) change. The CSRF token and
-    extension-tag injection are intentionally NOT applied here — they vary per
-    request and are applied by the caller against this base string.
-    """
+    """Return the shell with current asset identities, but no session data."""
+    from api.asset_versions import (
+        asset_replacements, apply_asset_replacements, file_signature, service_worker_version,
+    )
     from api.updates import WEBUI_VERSION
+    from urllib.parse import quote
+
+    version_token = quote(WEBUI_VERSION, safe="")
 
     index_path = api_config.get_index_html_path()
-    st = index_path.stat()
-    sig = (index_path, st.st_size, st.st_mtime_ns)
+    source_sig = (index_path, file_signature(index_path))
+    with _INDEX_SHELL_CACHE_LOCK:
+        source = _INDEX_SHELL_CACHE.get("source")
+    if not source or source[0] != source_sig:
+        source = (source_sig, index_path.read_text(encoding="utf-8"))
+        with _INDEX_SHELL_CACHE_LOCK:
+            _INDEX_SHELL_CACHE["source"] = source
+    replacements = asset_replacements(source[1], api_config.get_static_root())
+    worker_version = (
+        service_worker_version(api_config.get_static_root(), version_token)
+        if '__SERVICE_WORKER_VERSION__' in source[1] else ''
+    )
+    sig = (source_sig, replacements, worker_version, WEBUI_VERSION, MAX_UPLOAD_BYTES)
     with _INDEX_SHELL_CACHE_LOCK:
         cached = _INDEX_SHELL_CACHE.get("base")
         if cached and cached[0] == sig:
             return cached[1]
-    from urllib.parse import quote
-
-    version_token = quote(WEBUI_VERSION, safe="")
     base = (
-        index_path.read_text(encoding="utf-8")
+        apply_asset_replacements(source[1], replacements)
+        .replace("__SERVICE_WORKER_VERSION__", worker_version)
         .replace("__WEBUI_VERSION__", version_token)
         .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
     )
@@ -16963,6 +17378,8 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if msg_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
+            from api.history_display import project_history_for_display
+            _truncated_msgs = project_history_for_display(_truncated_msgs, profile=_session_profile)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
                 _truncated_msgs,
                 getattr(s, "anchor_activity_scenes", None),
@@ -17029,12 +17446,12 @@ def _handle_session_get(handler, parsed) -> bool:
                 _fb_cl,
                 model_changed=_model_changed_for_context,
             ):
-                if _persisted_cl and _fb_cl != _persisted_cl:
-                    # The old threshold belongs to the old window. Hiding it
-                    # is less useful than keeping the same compression ratio
-                    # against the freshly resolved context length.
-                    _threshold_tokens = _rescale_threshold_tokens_for_context_window(
-                        _threshold_tokens,
+                if _model_changed_for_context or (_persisted_cl and _fb_cl != _persisted_cl):
+                    # A metadata refresh does not reconfigure compression.
+                    # Keep the last observed trigger for the same model; a model
+                    # switch invalidates that observation until the next run.
+                    _threshold_tokens = _observed_threshold_tokens_for_context_window(
+                        0 if _model_changed_for_context else _threshold_tokens,
                         _persisted_cl,
                         _fb_cl,
                     )
@@ -17157,6 +17574,16 @@ def _handle_session_get(handler, parsed) -> bool:
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+        if load_messages:
+            from .turn_journal import read_user_inputs
+            try:
+                raw["_user_inputs"] = read_user_inputs(sid)
+            except (ValueError, OSError):
+                raw["_user_inputs"] = []
+                raw["_user_inputs_unavailable"] = True
+                logger.warning("User input receipts unavailable for session load", exc_info=True)
+        if load_messages and raw.get("active_stream_id") in active_stream_ids:
+            raw["_active_turn_boundary"] = _active_turn_display_boundary(s, _all_msgs)
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:
@@ -17172,6 +17599,9 @@ def _handle_session_get(handler, parsed) -> bool:
         ):
             raw["is_cli_session"] = False
             raw["read_only"] = True
+        if _external_review_identity(sid):
+            raw.update(read_only=True, can_resume=False)
+            raw.pop("regeneration_revision", None)
         if not raw.get("read_only"):
             # #8517 notice: the memory status of the agent serving this session, so an
             # idle or mid-turn reload shows it at once. Omitted when unknown; codes only.
@@ -17203,7 +17633,7 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if revision:
                 raw["regeneration_revision"] = revision
-        redact = redact_session_data(raw)
+        redact = public_session_projection(raw)
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
         resp = j(handler, {"session": redact})
@@ -17434,6 +17864,7 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/login":
+        from api.asset_versions import render_asset_urls
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
         # `settings.language` is None until the user explicitly picks a locale
@@ -17485,7 +17916,7 @@ def handle_get(handler, parsed) -> bool:
             _password_form_html = ""
         version_token = quote(WEBUI_VERSION, safe="")
         _page = (
-            _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
+            render_asset_urls(_LOGIN_PAGE_HTML, api_config.get_static_root()).replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
             .replace("{{WEBUI_VERSION}}", version_token)
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
@@ -17620,13 +18051,13 @@ def handle_get(handler, parsed) -> bool:
         static_root = api_config.get_static_root()
         sw_path = (static_root / "sw.js").resolve()
         if sw_path.exists():
-            # Inject the current git-derived version as the cache name so the
-            # service worker cache busts automatically on every new deploy.
+            # Fingerprint the manifest and worker bytes, not startup Git state.
+            from api.asset_versions import render_service_worker
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
             version_token = quote(WEBUI_VERSION, safe="")
-            text = sw_path.read_text(encoding="utf-8").replace(
-                "__WEBUI_VERSION__", version_token
+            text = render_service_worker(
+                sw_path.read_text(encoding="utf-8"), static_root, version_token
             )
             data = text.encode("utf-8")
             handler.send_response(200)
@@ -18569,11 +19000,17 @@ def handle_get(handler, parsed) -> bool:
             return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
-        from api.profiles import cron_store_scope
+        # Keep the fork's non-blocking read-only polling path. It binds the
+        # profile-local store when supported without serializing behind the
+        # execution/profile lock; the HTTP 503 shape remains unchanged.
+        from api.profiles import CronProfileBusy, cron_read_profile_context
 
         _ensure_agent_cron_import_path()
-        with cron_store_scope():
-            return _handle_cron_recent(handler, parsed)
+        try:
+            with cron_read_profile_context():
+                return _handle_cron_recent(handler, parsed)
+        except CronProfileBusy:
+            return j(handler, {"error": "Cron profile is busy"}, status=503)
 
     if parsed.path == "/api/crons/status":
         from api.profiles import cron_store_scope
@@ -19193,6 +19630,26 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         return True
 
+    # Native identity owns the conversation even when a legacy local sidecar
+    # looks writable. New POST routes are denied unless explicitly read-only.
+    native_candidates = [body.get("session_id") if isinstance(body, dict) else None]
+    native_candidates.extend(parse_qs(getattr(parsed, "query", "")).get("session_id", []))
+    for native_sid in native_candidates:
+        native_identity = _external_review_identity(native_sid.strip()) if isinstance(native_sid, str) else {}
+        native_post_allowed = parsed.path == "/api/session/import_cli" or (
+            native_identity.get("source_tag") == "claude_code"
+            and parsed.path in {"/api/share/create", "/api/share/revoke"}
+        )
+        # Classify malformed aliases only to reject them, never repair or look up.
+        if native_identity and (
+            native_sid != native_sid.strip()
+            or not native_sid.startswith(native_identity["source_tag"] + "_")
+            or not native_post_allowed
+        ):
+            if diag:
+                diag.finish()
+            return bad(handler, "Native review sessions are read-only", 403)
+
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
 
@@ -19337,6 +19794,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "session_id is required", 400)
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
+        except NativeReviewShareDenied:
+            return bad(handler, "Native review projections cannot be publicly shared", 403)
         except KeyError:
             return bad(handler, "Session not found", 404)
         # #8255 review (second round): build the snapshot from the session as it
@@ -19462,6 +19921,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "session_id is required", 400)
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
+        except NativeReviewShareDenied:
+            return bad(handler, "Native review projections cannot be publicly shared", 403)
         except KeyError:
             return bad(handler, "Session not found", 404)
         # #8255: the LRU-cached session is not the share-token authority. The
@@ -19893,14 +20354,14 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
-        # CLI-parity /reasoning handler — writes to the same config.yaml keys
-        # the CLI uses and, when session_id is supplied, records the session
-        # override so conversation switches restore it. The profile default
-        # set via WebUI is still honoured in the terminal REPL and vice versa.
+        # CLI-parity /reasoning: preserve session choices AND selected-model
+        # reasoning_overrides without leaking them onto unrelated models.
+        # The profile-wide default remains shared with the terminal REPL.
         # Body is one of:
         #   {"display": "show"|"hide"|"on"|"off"}   → display.show_reasoning
         #   {"effort":  "none"|"minimal"|"low"|"medium"|"high"|"xhigh"}
-        #                                            → agent.reasoning_effort
+        #                      → per-model override when model_id is supplied;
+        #                        otherwise agent.reasoning_effort
         try:
             display = body.get("display")
             effort = body.get("effort")
@@ -20026,9 +20487,15 @@ def handle_post(handler, parsed) -> bool:
                         try:
                             from api.profiles import get_hermes_home_for_profile
 
-                            write_reasoning_effort(
-                                effort, get_hermes_home_for_profile(reasoning_profile)
-                            )
+                            if model_id:
+                                write_reasoning_effort(
+                                    effort, get_hermes_home_for_profile(reasoning_profile),
+                                    model_id=model_id,
+                                )
+                            else:
+                                write_reasoning_effort(
+                                    effort, get_hermes_home_for_profile(reasoning_profile)
+                                )
                         except Exception:
                             try:
                                 set_session_reasoning_effort(reasoning_session, previous_effort)
@@ -23181,7 +23648,7 @@ _COMPRESSIBLE_MIME = {
 }
 
 # In-process cache for raw bytes, compressed bytes, and ETag. The cache is keyed
-# by absolute path and invalidated on (size, high-precision mtime) change, so a
+# by absolute path and invalidated on file identity/size/mtime/ctime change, so a
 # redeploy is picked up without a process restart. Missing/random paths never
 # enter the cache; memory cost is bounded by the static/ tree's served files.
 _STATIC_CACHE: dict = {}
@@ -23189,6 +23656,7 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 
 def _serve_static(handler, parsed):
+    from api.asset_versions import content_version, file_signature
     static_root = api_config.get_static_root().resolve()
     # Strip the leading '/static/' prefix, then resolve and sandbox. The
     # server-owned prefix is matched case-insensitively upstream, but the file
@@ -23215,45 +23683,34 @@ def _serve_static(handler, parsed):
     ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
 
     # Look up or populate the per-file cache (raw, optional gzip, ETag).
-    # Keyed by absolute path; invalidated by (size, nanosecond mtime).
-    st = static_file.stat()
-    sig = (st.st_size, st.st_mtime_ns)
+    # Keyed by absolute path; invalidated by the full file signature.
+    sig = file_signature(static_file)
     cache_key = str(static_file)
-    raw = gz = etag = None
+    raw = gz = etag = fingerprint = None
     with _STATIC_CACHE_LOCK:
         cached = _STATIC_CACHE.get(cache_key)
         if cached and cached[0] == sig:
-            _, raw, gz, etag = cached
+            _, raw, gz, etag, fingerprint = cached
     if raw is None:
         raw = static_file.read_bytes()
-        # Weak ETag: equality semantics, derived from filesystem identity.
-        etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
+        # Identity describes the bytes actually served (including across races).
+        fingerprint = content_version(raw)
+        etag = f'W/"{fingerprint}"'
         gz = (gzip.compress(raw, compresslevel=6)
               if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
               else None)
         with _STATIC_CACHE_LOCK:
-            _STATIC_CACHE[cache_key] = (sig, raw, gz, etag)
+            _STATIC_CACHE[cache_key] = (sig, raw, gz, etag, fingerprint)
 
-    # The page template substitutes __WEBUI_VERSION__ at request time (see the
-    # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
-    # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
-    # is safe to cache aggressively: any redeploy changes the URL.
-    #
-    # #6992: that assumption breaks for an in-place update. The apply swaps the
-    # checkout and only then does _schedule_restart() sleep before os.execv(),
-    # so this (old) process answers /static/* from a tree that is already the
-    # next revision while ?v= still carries this process's startup version —
-    # the URL does not change but the bytes do, and #5428's skew check cannot
-    # see it because both sides agree on the same token. Stamping such a
-    # response immutable would let a browser pin revision-B bytes under the
-    # revision-A URL for a year: a mixed front-end bundle. While the checkout
-    # may be changing under us, degrade to the short-cache policy instead of
-    # promising immutability (the 304 branch below shares cache_control, so a
-    # revalidation cannot re-pin it either).
+    # Only the actual content identity earns immutable caching; an old Git
+    # token still receives usable bytes with short-cache semantics. During an
+    # in-place checkout migration, do not promise a changing tree's bytes are
+    # immutable under any keys, including exact fingerprints.
     version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
-    has_fingerprint = bool(version_values[0]) and not working_tree_may_be_changing()
+    has_fingerprint = version_values == [fingerprint] and not working_tree_may_be_changing()
     cache_control = (
         "public, max-age=31536000, immutable" if has_fingerprint
+        else "no-store" if any(version_values)
         else "public, max-age=300"
     )
 
@@ -25862,7 +26319,7 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
     return True
 
 
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_MEDIA_TOKEN_RE = re.compile(r"MEDIA:[ \t]*([^\s\)\]]+)")
 # #7680 re-gate (9/22): two-pass scan.
 #   1. `` `MEDIA:path` `` (backtick-wrapped, inline-code form) → strip
 #      the wrapping backticks so the bare-token pass below sees a
@@ -27198,6 +27655,8 @@ def _handle_live_models(handler, parsed):
             _set_cached_live_models(cache_key, payload)
             return j(handler, payload)
 
+        from api.config import _configured_live_provider_record
+        configured_catalog = _configured_live_provider_record(provider, cfg) is not None
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
         # the static _PROVIDER_MODELS list — it never raises.
@@ -27210,11 +27669,18 @@ def _handle_live_models(handler, parsed):
             if _agent_dir not in _sys.path:
                 _sys.path.insert(0, _agent_dir)
             from hermes_cli.models import provider_model_ids as _pmi
-            ids = _pmi(provider)
+            if configured_catalog:
+                from api.config import _read_live_provider_model_ids
+                ids = _read_live_provider_model_ids(provider)
+            else:
+                ids = _pmi(provider)
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
 
+        if configured_catalog and not ids:
+            # A configured route never falls through to another authority.
+            return _finish({"provider": provider, "models": [], "count": 0})
         if not ids:
             custom_provider_entry = None
 
@@ -27501,6 +27967,10 @@ def _handle_live_models(handler, parsed):
             if not mid:
                 continue
             entry = {"id": mid, "label": _make_label(mid)}
+            if configured_catalog and not mid.startswith("@"):
+                # Live enrichment must retain the serving route even for
+                # vendor/model IDs absent from local per-model settings.
+                entry["id"] = f"@{provider}:{mid}"
             if annotate_fast_tier:
                 entry["supports_fast_tier"] = _model_supports_fast_tier_for_provider(mid, provider)
             models_out.append(entry)
@@ -28545,7 +29015,7 @@ _DEFERRED_WAKEUP_RETRY_TIMERS_LOCK = threading.Lock()
 _DEFERRED_WAKEUP_RETRY_DELAY_SECS = 2.0
 
 
-def _schedule_deferred_wakeup_retry(sid: str, *, retry_attempt: int = 0) -> None:
+def _schedule_deferred_wakeup_retry(sid: str, *, retry_attempt: int = 0, refund_attempt: bool = False) -> None:
     """Schedule ONE bounded drain retry for a launch-aborted wakeup (#7680).
 
     The recording call site (``_rearm_process_wakeup_after_launch_failure``)
@@ -28568,6 +29038,10 @@ def _schedule_deferred_wakeup_retry(sid: str, *, retry_attempt: int = 0) -> None
 
     Coalescing: if a retry is already pending for this session, keep it —
     one drain delivers one wakeup, and the prompt is queued either way.
+
+    A typed restart-drain refusal proves no launch occurred. Such refusals
+    preserve the existing attempt budget and keep one timer pending until
+    admission reopens; actual launch failures remain one-shot.
     """
     if not sid:
         return
@@ -28579,7 +29053,7 @@ def _schedule_deferred_wakeup_retry(sid: str, *, retry_attempt: int = 0) -> None
             timer = threading.Timer(
                 _DEFERRED_WAKEUP_RETRY_DELAY_SECS,
                 _run_deferred_wakeup_retry,
-                args=(sid, retry_attempt + 1),
+                args=(sid, retry_attempt if refund_attempt else retry_attempt + 1),
             )
             timer.daemon = True
             _DEFERRED_WAKEUP_RETRY_TIMERS[sid] = timer
@@ -30395,6 +30869,17 @@ def start_session_turn(
         }
     if not msg:
         return {"error": "message is required", "_status": 400}
+    # Preserve the older generation-bound drain marker used by the local
+    # updater. The native admission row follows; both are pre-session-mutation
+    # refusal points and share the existing retryable 503 response shape.
+    if api_config.restart_drain_active():
+        return {
+            "status": "restart_draining",
+            "retryable": True,
+            "error": "Hermes WebUI is completing a supervised restart; retry shortly.",
+            "_status": 503,
+        }
+
     # #7293: a server-initiated turn honours the same run-admission fence as a
     # browser chat/start. The refusal is a retryable 503 dict (never a raise),
     # so wakeup callers re-defer the prompt instead of dropping it.
@@ -31135,6 +31620,14 @@ def _handle_chat_start(handler, body, diag=None):
                 {"status": "suppressed", "reason": "silent_control_message"},
                 status=200,
             )
+        # Same pre-mutation legacy marker compatibility as start_session_turn.
+        if api_config.restart_drain_active():
+            return j(handler, {
+                "status": "restart_draining",
+                "retryable": True,
+                "error": "Hermes WebUI is completing a supervised restart; retry shortly.",
+            }, status=503)
+
         # #7293: refuse before any session mutation while a restart/update or
         # shutdown drain has closed run admission (503, code server_draining).
         _admission_refusal = run_admission_closed_response()
@@ -34373,6 +34866,11 @@ def _handle_clarify_respond(handler, body):
     if not response:
         return bad(handler, "response is required")
     clarify_id = body.get("clarify_id", "")
+    try:
+        owner_stream_id = getattr(get_session(sid, metadata_only=True), "active_stream_id", None)
+    except Exception:
+        # Display ownership must never prevent accepting a pending answer.
+        owner_stream_id = None
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
@@ -34392,7 +34890,18 @@ def _handle_clarify_respond(handler, body):
             "stale": True,
         }, status=409)
 
-    return j(handler, {"ok": True, "response": response})
+    receipt = None
+    try:
+        from .turn_journal import record_user_input
+        saved_receipt = record_user_input(
+            sid, "clarify", response, stream_id=owner_stream_id,
+        )
+        receipt = redact_session_data({'_user_inputs': [saved_receipt]})['_user_inputs'][0]
+    except Exception:
+        # Already accepted: report a display failure, never invite resubmission.
+        logger.warning("Accepted clarification display receipt could not be saved", exc_info=True)
+    return j(handler, {"ok": True, "response": _redact_text(response), "user_input": receipt,
+                       "display_recorded": receipt is not None})
 
 
 class _ManualCompressionMemoryHandler:
@@ -36153,7 +36662,7 @@ def _handle_session_import_cli(handler, body):
                 (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
                 or _is_subagent_child_session_id(sid)
             )
-        if changed:
+        if changed and not _external_review_identity(sid):
             existing.save(touch_updated_at=False)
             publish_session_list_changed(
                 "session_import_cli",
@@ -37334,8 +37843,26 @@ def _handle_mcp_server_update(handler, name, body):
                 server_cfg["timeout"] = int(body["timeout"])
             except (ValueError, TypeError):
                 pass
+        # This is an explicit raw-file replacement transaction, not a bulk save
+        # of the runtime-expanded MCP view. Preserve unchanged expansions, but
+        # honor literal credentials only at the fields supplied for this server.
+        literal_credential_paths = []
+        for field in ("headers", "env"):
+            supplied = server_cfg.get(field)
+            if not isinstance(supplied, dict):
+                continue
+            original = existing_cfg.get(field, {})
+            if not isinstance(original, dict):
+                original = {}
+            for key, value in supplied.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    continue
+                supplied[key] = _preserve_env_ref(original.get(key), value)
+                literal_credential_paths.append(("mcp_servers", name, field, key))
         servers[name] = server_cfg
         cfg["mcp_servers"] = servers
-        _save_yaml_config_file(config_path, cfg)
+        _save_yaml_config_file(
+            config_path, cfg, literal_credential_paths=tuple(literal_credential_paths)
+        )
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})

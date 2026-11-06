@@ -645,6 +645,7 @@ def _expand_settled_worklog(page) -> None:
           ) {
             _materializeDeferredWorklogRows(group);
           }
+          group.querySelectorAll('details.compact-ai-update-activity:not([open]) > summary').forEach(s=>s.click());
           return Boolean(group.querySelector('[data-anchor-scene-row="1"]'));
         }""",
         timeout=10000,
@@ -989,6 +990,7 @@ def main() -> int:
             """({reasoning, tool}) => {
               const turn = document.querySelector('#liveAssistantTurn');
               if (!turn) return false;
+              turn.querySelectorAll('details.compact-ai-update-activity:not([open]) > summary').forEach(s=>s.click());
               const text = turn.innerText || '';
               return text.includes(reasoning) &&
                 Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${tool}"]`));

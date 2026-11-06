@@ -271,7 +271,38 @@ def test_gateway_chat_health_payload_is_documented_as_operator_diagnostic_only()
         assert "not currently rendered as a user-facing health banner" in text
 
 
-def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("session_effort", "expected_effort"),
+    [(None, "low"), ("medium", "medium"), ("high", "high")],
+    ids=["legacy-model-override", "explicit-choice-matches-profile", "explicit-session-choice"],
+)
+def test_gateway_chat_worker_translates_sse_and_persists_session(
+    tmp_path, monkeypatch, session_effort, expected_effort
+):
+    """Legacy absence inherits the model override; every persisted session
+    choice wins, even when its value equals the current profile default."""
+    import api.config as config_api
+    import api.profiles as profiles_api
+    monkeypatch.setattr(config_api, 'get_config', lambda: {'agent': {
+        'system_prompt': 'WRONG_GLOBAL_OVERLAY', 'reasoning_effort': 'high'}})
+    monkeypatch.setattr(profiles_api, 'get_hermes_home_for_profile', lambda profile: tmp_path / str(profile or 'default'))
+    homes = []
+    def profile_config(home, **kwargs):
+        if "isolate_config_override" in kwargs:
+            assert kwargs["isolate_config_override"] is True
+        homes.append(Path(home))
+        return {'agent': {'system_prompt': 'SESSION_PROFILE_OVERLAY',
+                          'reasoning_effort': 'medium',
+                          'reasoning_overrides': {'alias-target-model': 'low'}}}
+    monkeypatch.setattr(config_api, 'get_config_for_profile_home', profile_config)
+    monkeypatch.setattr(profiles_api, 'get_profile_runtime_env', lambda home: {
+        'HERMES_WEBUI_GATEWAY_BASE_URL': 'http://profile-gateway.invalid',
+        'HERMES_WEBUI_GATEWAY_API_KEY': 'secret-token'})
+    request_configs = []
+    def request_overrides(cfg, **kwargs):
+        request_configs.append(cfg)
+        return {}
+    monkeypatch.setattr(config_api, '_main_model_request_overrides', request_overrides)
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
@@ -308,7 +339,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
-    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *args, **kwargs: "high")
+    monkeypatch.setattr(config_api, 'resolve_model_reasoning_efforts', lambda *args, **kwargs: ['low', 'medium', 'high'])
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
         "status": "loaded",
         "source": "test",
@@ -324,6 +355,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     s = new_session()
     stream_id = "stream-gateway-test"
+    s.profile = 'profile-test'
     s.active_stream_id = stream_id
     s.pending_user_message = "Say hello"
     s.pending_attachments = []
@@ -344,6 +376,10 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: False)
 
     def start_gateway(session, **kw):
+        # Control the persisted session-effort provenance at this worker boundary:
+        # Only None is legacy/inherited; stored values are explicit choices.
+        session.reasoning_effort = session_effort
+        session.save(touch_updated_at=False)
         gateway_chat._run_gateway_chat_streaming(
             session.session_id, kw["msg"], kw["model"], kw["workspace"], stream_id,
             kw["attachments"], model_provider=kw["model_provider"],
@@ -370,14 +406,18 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert saved.model == "alias-target-model"
     assert saved.model_provider == "model-alias-profile-bound-lane"
     assert stream_id not in STREAMS
-    assert captured["url"] == "http://gateway.local/v1/chat/completions"
+    assert captured["url"] == "http://profile-gateway.invalid/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
     assert captured["headers"]["X-hermes-session-id"] == s.session_id
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
-    assert payload["reasoning_effort"] == "high"
-    assert payload["model_options"] == {"reasoning": {"enabled": True, "effort": "high"}}
+    assert payload["reasoning_effort"] == expected_effort
+    assert payload["model_options"] == {"reasoning": {"enabled": True, "effort": expected_effort}}
+    assert request_configs and all(cfg['agent']['system_prompt'] == 'SESSION_PROFILE_OVERLAY' for cfg in request_configs)
+    assert tmp_path / 'profile-test' in homes
+    assert captured['body'].count('SESSION_PROFILE_OVERLAY') == 1
+    assert 'WRONG_GLOBAL_OVERLAY' not in captured['body']
     assert payload["model"] == "alias-target-model"
     assert payload["provider"] == "openai-codex"
     assert "ambient-provider-key" not in captured["body"]
@@ -2550,4 +2590,3 @@ def test_shared_url_key_a_profile_config_naming_the_shared_url_still_sends_the_s
 
     url, key = gateway_chat._gateway_endpoint_for_profile("beta")
     assert url.rstrip("/") == "http://gw.local:8642" and key == "shared-root-key", (url, key)
-

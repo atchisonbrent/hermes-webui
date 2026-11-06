@@ -39,6 +39,7 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
+    RunAdmissionDrainingError,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
     peek_stream,
@@ -240,6 +241,8 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
             raw.pop('regeneration_revision', None)
     except Exception:
         raw.pop('regeneration_revision', None)
+    from api.history_display import project_history_for_display
+    raw['messages'] = project_history_for_display(raw['messages'], profile=getattr(session, 'profile', None))
     return raw
 
 
@@ -1664,11 +1667,47 @@ def _webui_ephemeral_system_prompt(
     personality_prompt: Optional[str],
     surface_context: Optional[dict] = None,
     config_data: Optional[dict] = None,
+    *,
+    personality_name: Optional[str] = None,
 ) -> str:
-    """Build WebUI-only runtime instructions that are not persisted to history."""
+    """Compose the native session overlay with WebUI surface guidance.
+
+    Explicit session selection (including neutral '') overrides the profile
+    selection. Otherwise the native resolver supplies personality/manual-overlay
+    precedence. An explicit prompt body remains supported for existing callers.
+    """
+    effective_config = dict(config_data or {})
+    if personality_name is not None:
+        effective_config['display'] = {
+            **(effective_config.get('display') or {}),
+            'personality': personality_name,
+        }
+    overlay = personality_prompt
+    if not overlay:
+        try:
+            from hermes_cli.personality import resolve_ephemeral_system_prompt
+        except ImportError:
+            # Compatibility with older/standalone installs: configured
+            # personalities and the manual overlay still work. Built-in-only
+            # personalities require the companion agent's native resolver.
+            agent_cfg = effective_config.get("agent") or {}
+            selected = str((effective_config.get("display") or {}).get("personality") or "").strip().lower()
+            definitions = {str(k).strip().lower(): v for k, v in (agent_cfg.get("personalities") or {}).items()}
+            body = definitions.get(selected) if selected not in ('', 'none', 'neutral', 'default') else None
+            if isinstance(body, dict):
+                parts = [body.get('system_prompt') or body.get('prompt') or '']
+                for field in ('tone', 'style'):
+                    if body.get(field):
+                        parts.append(f'{field.title()}: {body[field]}')
+                body = '\n'.join(str(part).strip() for part in parts if str(part).strip())
+            if not body:
+                body = agent_cfg.get('system_prompt', '')
+            overlay = str(body or '')
+        else:
+            overlay = resolve_ephemeral_system_prompt(effective_config)
     parts = []
-    if personality_prompt:
-        parts.append(str(personality_prompt).strip())
+    if overlay:
+        parts.append(str(overlay).strip())
     surface_prompt = _webui_surface_context_prompt(surface_context)
     if surface_prompt:
         parts.append(surface_prompt)
@@ -2400,12 +2439,24 @@ def _classify_provider_error(
             'hint': 'The conversation context is too large to compress safely. Start a new conversation or retry with a narrower task.',
         }
     if silent_failure:
+        result_messages = result.get('messages') if isinstance(result, dict) else None
+        last_message = result_messages[-1] if isinstance(result_messages, list) and result_messages else None
+        if (
+            isinstance(last_message, dict)
+            and last_message.get('finish_reason') == 'stop'
+            and _is_reasoning_only_assistant_message(last_message)
+        ):
+            return {
+                'label': 'Model produced no final answer',
+                'type': 'reasoning_only',
+                'hint': 'The model stopped after producing reasoning but no final answer. Its work may be incomplete. Check completed tool actions before retrying; disabling reasoning may help with this model.',
+            }
         return {
             'label': 'No response from provider',
             # Preserve the existing no_response event type (#373) while making
             # the catch-all silent-failure message more specific for #1765.
             'type': 'no_response',
-            'hint': 'The provider returned no content and no error. This often means a usage/rate limit was hit silently. Check provider status, switch providers via `hermes model`, or try again in a moment.',
+            'hint': 'The provider returned no content and no error. The cause is unknown. Check provider logs and completed tool actions before retrying.',
         }
     return {'label': 'Error', 'type': 'error', 'hint': ''}
 
@@ -4461,6 +4512,15 @@ def _drain_webui_process_notifications(
                     evt_sid, stale_age, stale_completion_max_age,
                 )
             continue
+
+        # Routing ownership is not acknowledgment: the background queue may
+        # already own this result while the agent later consumes its output.
+        from api import config as _completion_cfg
+        with _completion_cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+            seen = _completion_cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
+            if evt_sid in seen:
+                continue
+            seen.add(evt_sid)
 
         if is_stale:
             logger.info(
@@ -10152,6 +10212,73 @@ def _session_context_messages(session):
     return session.messages or []
 
 
+def _dedupe_state_backed_reasoning_rows(messages):
+    """Collapse replayed copies of one durable reasoning-only state.db row.
+
+    This is intentionally narrower than ``_message_identity``.  Equal reasoning
+    text is not a global turn identity: two legitimate turns may think the same
+    thing, and WebUI's display projection can expose content-distinct rows with
+    the same ``_row_id``.  Collapse only rows with durable state provenance:
+
+    * positive integer ``_row_id`` and ``_db_persisted``;
+    * reasoning-only assistant shape, excluding live ``_partial`` rows;
+    * exact timestamp and complete, non-empty ``reasoning_content`` match.
+
+    ``reasoning`` is incremental display state and may differ across replayed
+    copies of the same settled row.  Keep the longest snapshot at the original
+    position so repair improves, rather than discards, visible trace detail.
+    """
+    rows = list(messages or [])
+    if len(rows) < 2:
+        return rows
+    out = []
+    kept_by_key = {}
+    for message in rows:
+        if not isinstance(message, dict):
+            out.append(message)
+            continue
+        row_id = message.get('_row_id')
+        settled_reasoning = message.get('reasoning_content')
+        timestamp = message.get('timestamp', message.get('_ts'))
+        eligible = (
+            isinstance(row_id, int)
+            and not isinstance(row_id, bool)
+            and row_id > 0
+            and message.get('_db_persisted') is True
+            and not message.get('_partial')
+            and _is_reasoning_only_assistant_message(message)
+            and isinstance(settled_reasoning, str)
+            and bool(settled_reasoning)
+            and timestamp not in (None, '')
+        )
+        if not eligible:
+            out.append(message)
+            continue
+        key = (row_id, timestamp, settled_reasoning)
+        existing_idx = kept_by_key.get(key)
+        if existing_idx is None:
+            kept_by_key[key] = len(out)
+            out.append(message)
+            continue
+        existing = out[existing_idx]
+        existing_reasoning = str(existing.get('reasoning') or '')
+        incoming_reasoning = str(message.get('reasoning') or '')
+        if len(incoming_reasoning) > len(existing_reasoning):
+            replacement = dict(existing)
+            replacement['reasoning'] = message.get('reasoning')
+            for field in ('codex_reasoning_items', 'codex_message_items'):
+                incoming = message.get(field)
+                existing_value = replacement.get(field)
+                if incoming and (
+                    not existing_value
+                    or len(json.dumps(incoming, sort_keys=True, default=str))
+                    > len(json.dumps(existing_value, sort_keys=True, default=str))
+                ):
+                    replacement[field] = copy.deepcopy(incoming)
+            out[existing_idx] = replacement
+    return out
+
+
 def _message_identity(msg):
     if not isinstance(msg, dict):
         return None
@@ -11772,6 +11899,11 @@ def _merge_display_messages_after_agent_result(
     # three inputs consistently so prefix/delta detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
+    # A recovered state.db reasoning row can be replayed into the display more
+    # than once while its incremental `reasoning` snapshot changes. Scrub only
+    # duplicates proven to share the same durable row provenance; do not broaden
+    # global message identity (equal reasoning can be legitimate across turns).
+    previous_display = _dedupe_state_backed_reasoning_rows(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -14151,6 +14283,7 @@ def _run_agent_streaming(
     _turn_route_provider = model_provider
     cancel_event = threading.Event()
     q = peek_stream(stream_id)
+    draining = False
     if q is not None:
         # Snapshot lookup is not admission: Stop can detach the stream before
         # we publish the initial run. Register ownership and its retained cancel
@@ -14164,23 +14297,43 @@ def _run_agent_streaming(
                 STREAM_PARTIAL_TEXT[stream_id] = ''
                 STREAM_REASONING_TEXT[stream_id] = ''
                 STREAM_LIVE_TOOL_CALLS[stream_id] = []
-                register_active_run(
-                    stream_id,
-                    session_id=session_id,
-                    started_at=time.time(),
-                    phase="starting",
-                    workspace=str(workspace),
-                    model=model,
-                    provider=model_provider,
-                    ephemeral=bool(ephemeral),
-                    backend=WEBUI_LOCAL_CHAT_BACKEND,
-                )
-                # Worker admission ends the launch phase (#7302 finding 5): retire
-                # the claim published at registration. Ownership lives in
-                # ACTIVE_RUNS from here on.
-                from api.config import retire_pre_admission_claim_if_owned
+                try:
+                    register_active_run(
+                        stream_id,
+                        streams_lock_held=True,
+                        session_id=session_id,
+                        started_at=time.time(),
+                        phase="starting",
+                        workspace=str(workspace),
+                        model=model,
+                        provider=model_provider,
+                        ephemeral=bool(ephemeral),
+                        backend=WEBUI_LOCAL_CHAT_BACKEND,
+                    )
+                except RunAdmissionDrainingError:
+                    draining = True
+                else:
+                    # Worker admission ends the launch phase (#7302 finding 5): retire
+                    # the claim published at registration. Ownership lives in
+                    # ACTIVE_RUNS from here on.
+                    from api.config import retire_pre_admission_claim_if_owned
 
-                retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
+                    retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
+    if draining:
+        if q is not None:
+            q.put_nowait((
+                "apperror",
+                {
+                    "type": "restart_draining",
+                    "retryable": True,
+                    "message": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                    "session_id": session_id,
+                },
+            ))
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        release_stream_owned_registries(stream_id, session_id=session_id)
+        return
     if q is None:
         # The stream was cancelled (or cleared as an orphan) before this worker
         # was admitted, so no teardown finally will ever run for it: release
@@ -14444,22 +14597,12 @@ def _run_agent_streaming(
                         _real_ctx_cache[0] = _resolved_real
                     # Apply the cached real cap when the guard determined one.
                     if _real_ctx_cache[0]:
-                        # Also rescale threshold_tokens by the same ratio so the
-                        # auto-compress trigger reflects the real window, not
-                        # the stale global cap (e.g. 197.2k @ 232K cap → ~850k
-                        # @ 1M real cap).
-                        _orig_cc_cl = getattr(_cc, 'context_length', 0) or 0
-                        _orig_thresh = getattr(_cc, 'threshold_tokens', 0) or 0
-                        _cc_cl_u = _real_ctx_cache[0]
-                        if _orig_cc_cl > 0 and _orig_thresh > 0:
-                            _scaled_thresh = int(_orig_thresh * _real_ctx_cache[0] / _orig_cc_cl)
-                            _usage['context_length'] = _cc_cl_u
-                            _usage['threshold_tokens'] = _scaled_thresh
-                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
-                        else:
-                            _usage['context_length'] = _cc_cl_u
-                            _usage['threshold_tokens'] = _orig_thresh
-                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                        # Metadata correction is display-only. Preserve the actual
+                        # compressor trigger: scaling it invents a threshold that
+                        # the agent never uses (especially with absolute caps).
+                        _usage['context_length'] = _real_ctx_cache[0]
+                        _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
+                        _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
                     else:
                         _usage['context_length'] = _cc_cl_u
                         _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
@@ -16025,21 +16168,20 @@ def _run_agent_streaming(
             except Exception:
                 _max_tokens_cfg = None
 
-            # Prefer the session-owned effort so switching conversations restores
-            # the same runtime setting shown by the composer. Legacy sessions
-            # without that metadata continue to inherit the profile/CLI value,
-            # read from the same isolated session-profile config as the chip
-            # and the Gateway worker (_cfg stays ambient-aware for toolsets).
-            # The live session `s` is what POST /api/reasoning mutates and what
-            # the Gateway worker reads.
+            # Preserve the stored per-session choice and the per-model override
+            # inherited by legacy sessions; both are capability-coerced for the
+            # actual runtime model, never promoted to another model/provider.
             try:
                 _session_effort = getattr(s, 'reasoning_effort', None)
-                try:
-                    _session_effort = effective_session_reasoning_effort(
+                if _session_effort is None:
+                    try:
+                        from api.config import effective_session_reasoning_effort
+                        _session_effort = effective_session_reasoning_effort(
                         _session_effort, _profile_home,
-                    )
-                except Exception:
-                    logger.warning("isolated reasoning config read failed; using session config", exc_info=True)
+                        model_id=model or resolved_model,
+                        )
+                    except Exception:
+                        logger.warning('isolated reasoning config read failed; using session config', exc_info=True)
                 _effort = resolve_session_reasoning_effort(
                     _cfg,
                     session_effort=_session_effort,
@@ -16340,30 +16482,11 @@ def _run_agent_streaming(
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
-            # Resolve personality prompt from config.yaml agent.personalities
-            # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
-            _personality_prompt = None
-            _pname = getattr(s, 'personality', None)
-            if _pname:
-                _agent_cfg = _cfg.get('agent', {})
-                _personalities = _agent_cfg.get('personalities', {})
-                if isinstance(_personalities, dict) and _pname in _personalities:
-                    _pval = _personalities[_pname]
-                    if isinstance(_pval, dict):
-                        _parts = [_pval.get('system_prompt', '') or _pval.get('prompt', '')]
-                        if _pval.get('tone'):
-                            _parts.append(f'Tone: {_pval["tone"]}')
-                        if _pval.get('style'):
-                            _parts.append(f'Style: {_pval["style"]}')
-                        _personality_prompt = '\n'.join(p for p in _parts if p)
-                    else:
-                        _personality_prompt = str(_pval)
-            # Pass WebUI-only runtime guidance via ephemeral_system_prompt
-            # (agent's own mechanism). This preserves any selected personality
-            # while making long tool runs emit real user-visible interim text
-            # through interim_assistant_callback instead of frontend guesses.
+            # Resolve the native profile/session overlay in the shared builder.
+            # Do not duplicate personality precedence at individual call sites.
             agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
-                _personality_prompt,
+                None,
+                personality_name=getattr(s, 'personality', None),
                 surface_context={
                     'source': 'webui',
                     'session_id': session_id,
@@ -16982,7 +17105,7 @@ def _run_agent_streaming(
                 if (
                     _terminal_failure
                     and (_soft_partial_terminal_failure or _tool_limit_reached)
-                    and _classification['type'] == 'no_response'
+                    and _classification['type'] in {'no_response', 'reasoning_only'}
                     and not _saved_transcript_lacks_final_answer
                 ):
                     _terminal_failure = False
@@ -17761,9 +17884,9 @@ def _run_agent_streaming(
                 # returns them on reload instead of falling back to 0.
                 _cc_for_save = getattr(agent, 'context_compressor', None)
                 # Initialized before the compressor block so the #3256/#3263
-                # threshold-rescale below is safe even when there is no
+                # threshold-preservation block below is safe without a
                 # compressor (fresh agent / interrupted stream): _skip_cc_cl
-                # stays False and _cc_cl stays 0, so the rescale is a no-op.
+                # stays False and _cc_cl stays 0, so it is a no-op.
                 _skip_cc_cl = False
                 _cc_cl = 0
                 if _cc_for_save:
@@ -17891,21 +18014,15 @@ def _run_agent_streaming(
                         # Older hermes-agent builds may not expose this helper.
                         # Better to leave context_length=0 than crash the save.
                         pass
-                # #3256/#3263: when we skipped the stale compressor cap for a
-                # non-default model and recomputed the real per-model window
-                # above, rescale the persisted threshold_tokens to that real cap
-                # so the auto-compress trigger and the reloaded context-ring
-                # match the live snapshot (which already rescales). Without this,
-                # a reload shows a smaller compression trigger than streaming did.
-                # Only rescale when both the original cap and threshold are
-                # positive; otherwise clear the threshold to 0 (consistent with
-                # the live-snapshot path) rather than leave a stale value.
+                # Persist the observed runtime trigger, not a ratio-scaled guess.
+                # Correcting display metadata does not reconfigure the compressor.
+                # Invalid windows still clear the observation as before.
                 if _skip_cc_cl:
                     _orig_cap = _cc_cl  # the stale global cap the compressor reported
                     _orig_thresh = getattr(s, 'threshold_tokens', 0) or 0
                     _real_cap = getattr(s, 'context_length', 0) or 0
                     if _real_cap > 0 and _orig_cap > 0 and _orig_thresh > 0:
-                        s.threshold_tokens = int(_orig_thresh * _real_cap / _orig_cap)
+                        s.threshold_tokens = _orig_thresh
                     else:
                         s.threshold_tokens = 0
                 if not ephemeral and s.messages:
@@ -18153,10 +18270,8 @@ def _run_agent_streaming(
             _cc = getattr(agent, 'context_compressor', None)
             if _cc:
                 _cc_cl_sse = getattr(_cc, 'context_length', 0) or 0
-                # #3256/#3263: remember the original compressor cap + threshold
-                # so that if we drop the stale cap below and the fallback
-                # resolves the real per-model window, we can rescale the
-                # threshold consistently (the live snapshot already does this).
+                # Snapshot the observed trigger for the defensive re-assertion
+                # after display-window fallback; metadata cannot change policy.
                 _orig_cc_cl_sse = _cc_cl_sse
                 _orig_cc_thresh_sse = getattr(_cc, 'threshold_tokens', 0) or 0
                 _dropped_stale_cap_sse = False
@@ -18250,15 +18365,11 @@ def _run_agent_streaming(
                         )
                     if _fb_cl:
                         usage['context_length'] = _fb_cl
-                        # #3256/#3263: if we dropped the stale compressor cap
-                        # for a non-default model, the threshold_tokens written
-                        # above is still the stale compressor value. Rescale it
-                        # to the real resolved window so the terminal `done`
-                        # payload matches the live snapshot (which rescales) —
-                        # otherwise messages.js overwrites S.lastUsage with the
-                        # stale threshold and the indicator reverts on stream end.
+                        # Defensively re-assert the observed trigger after the
+                        # window fallback. This matches live metering/persistence;
+                        # a display correction must not change runtime policy.
                         if _dropped_stale_cap_sse and _orig_cc_cl_sse > 0 and _orig_cc_thresh_sse > 0:
-                            usage['threshold_tokens'] = int(_orig_cc_thresh_sse * _fb_cl / _orig_cc_cl_sse)
+                            usage['threshold_tokens'] = _orig_cc_thresh_sse
                 except Exception:
                     pass
             # Fallback: when last_prompt_tokens is missing (no compressor), use the
@@ -19232,6 +19343,25 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
         return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
 
 
+def _with_steer_receipt(sid: str, text: str, body: dict, result: dict) -> dict:
+    """Persist accepted guidance after the stream-ownership locks are released."""
+    if result.get("accepted"):
+        receipt = None
+        try:
+            from .turn_journal import record_user_input
+            display_text = (body or {}).get("display_text")
+            if not isinstance(display_text, str) or not display_text.strip():
+                display_text = text
+            saved_receipt = record_user_input(sid, "steer", display_text, stream_id=result.get("stream_id"))
+            from .helpers import redact_session_data
+            receipt = redact_session_data({'_user_inputs': [saved_receipt]})['_user_inputs'][0]
+        except Exception:
+            # Guidance has already been accepted. A display failure is not a retry.
+            logger.warning("Accepted steer display receipt could not be saved", exc_info=True)
+        result.update(user_input=receipt, display_recorded=receipt is not None)
+    return result
+
+
 def _deliver_gateway_steer(sid: str, result: dict, text: str) -> dict:
     """Forward a Gateway-owned steer to its run; keep the queue fallback on refusal.
 
@@ -19310,7 +19440,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if stream_id:
         result = _steer_bound_stream(sid, stream_id, text)
         if result is not None:
-            return j(handler, _deliver_gateway_steer(sid, result, text))
+            return j(handler, _with_steer_receipt(
+                sid, text, body, _deliver_gateway_steer(sid, result, text),
+            ))
 
     with _cfg.SESSION_AGENT_CACHE_LOCK:
         cached = _cfg.SESSION_AGENT_CACHE.get(sid)
@@ -19409,7 +19541,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                         result = {"accepted": accepted, "fallback": None,
                                   "stream_id": active_stream_id}
 
-    return j(handler, _deliver_gateway_steer(sid, result, text))
+    return j(handler, _with_steer_receipt(
+        sid, text, body, _deliver_gateway_steer(sid, result, text),
+    ))
 
 
 # Bound on how long a server settle waits for the owning session's lock before

@@ -34,18 +34,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # inline-code backticks before the bare scan.
 JS_SITES: dict[str, list[str]] = {
     "static/ui.js": [
-        r"/MEDIA:([^\s\)\]]+)/g",       # linkifier
-        r"/MEDIA:[^\s]+/g",             # TTS flattener (no paren/bracket exclusion)
+        r"/MEDIA:[ \t]*([^\s\)\]]+)/g",       # linkifier; optional marker whitespace
+        r"/MEDIA:[ \t]*[^\s]+/g",             # TTS flattener (no paren/bracket exclusion)
     ],
     "static/messages.js": [
-        r"/^MEDIA:([^\s\)\]]+)$/",      # streaming chunk finalize
-        r"/MEDIA:([^\s\)\]]+)/g",       # streaming combined walk
-        r"/MEDIA:[^\s\)\]]*$/",         # streaming partial tail
+        r"/^MEDIA:[ \t]*([^\s\)\]]+)$/",      # streaming chunk finalize
+        r"/MEDIA:[ \t]*([^\s\)\]]+)/g",       # streaming combined walk
+        r"/MEDIA:[ \t]*[^\s\)\]]*$/",         # streaming partial tail
     ],
 }
 PY_SITES: dict[str, str] = {
-    "api/routes.py": r"MEDIA:([^\s\)\]]+)",
-    "api/media_snapshots.py": r"MEDIA:([^\s\)\]]+)",
+    "api/routes.py": r"MEDIA:[ \t]*([^\s\)\]]+)",
+    "api/media_snapshots.py": r"MEDIA:[ \t]*([^\s\)\]]+)",
 }
 
 # #7680 re-gate (9/22): every site that scans bare MEDIA: tokens also

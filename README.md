@@ -235,7 +235,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Sessions persist across page reloads and SSH tunnel reconnects
 - Model and reasoning-effort selections are restored per session; new-session defaults and legacy-session reasoning fallback use that session's profile configuration, including an authoritative `HERMES_CONFIG_PATH` for root; named profiles use their own `config.yaml` unless the override resolves inside that profile home
 - Browser tab title reflects the active session name
-- CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
+- CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally. [External review sessions](docs/external-review-sessions.md), including Claude Code and managed Antigravity runs, are shown read-only.
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
 
 ### Workspace file browser
@@ -278,6 +278,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Optional password auth -- off by default, zero friction for localhost
 - Enable via `HERMES_WEBUI_PASSWORD` env var or Settings panel
 - Installed PWAs work best with WebUI's own password. Reverse proxies are supported, but proxy basic auth can block the service-worker update fetches an installed app needs and leave it on a blank screen after an update; see `docs/troubleshooting.md` for recovery steps.
+- Identity-aware proxies that return `401` for expired AJAX sessions are supported: WebUI marks same-origin fetches with `X-Requested-With: XMLHttpRequest` and performs a top-level reload on expiry so the proxy can refresh its HttpOnly token. Mobile/PWA resumes also probe once instead of waiting for the next user action.
 - Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
 - After registering at least one passkey, Settings -> System can remove the password and keep passkey-only sign-in enabled. Password auth remains the bootstrap/recovery path until you choose to go passwordless; passkeys are same-origin and stored locally in the WebUI state directory
 - Optional native OIDC login for WebUI sessions -- configure `webui_oidc.issuer`, `client_id`, `allow_claim`, and `allow_values` in `config.yaml`, or set the matching `HERMES_WEBUI_OIDC_*` environment variables. OIDC stays disabled until all four are present, and startup prints a warning if the config is partial.

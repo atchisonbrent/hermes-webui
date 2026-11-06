@@ -446,7 +446,7 @@ def test_session_reload_accepts_real_256k_when_effective_model_changes(monkeypat
         "a genuine effective-model change to a 256k model must replace the "
         "old 1M snapshot rather than being treated as an anonymous fallback"
     )
-    assert body["threshold_tokens"] == 128_000
+    assert body["threshold_tokens"] == 0  # New model: wait for its real runtime trigger.
 
 
 def test_session_context_lookup_keeps_base_url_when_custom_helper_is_missing(monkeypatch):
@@ -491,23 +491,23 @@ def test_persistence_fallback_also_runs_when_skip_cc_cl():
     )
 
 
-def test_persistence_rescales_threshold_when_cap_skipped():
+def test_persistence_preserves_runtime_threshold_when_cap_skipped():
     """When the stale cap is skipped and the real cap recomputed, the persisted
-    threshold_tokens must be rescaled to the real cap (or cleared), so a reload
+    threshold_tokens must preserve the observed runtime trigger, so a reload
     matches the live snapshot."""
     assert "if _skip_cc_cl:" in _STREAMING_SRC
-    assert "s.threshold_tokens = int(_orig_thresh * _real_cap / _orig_cap)" in _STREAMING_SRC, (
-        "persistence path must rescale threshold_tokens to the real cap (#3263 MUST-FIX 2)"
+    assert "s.threshold_tokens = _orig_thresh" in _STREAMING_SRC, (
+        "persistence must not invent a trigger from display-only window metadata"
     )
 
 
-def test_sse_done_payload_rescales_threshold_when_cap_dropped():
-    """The terminal SSE usage payload must rescale threshold_tokens when it
+def test_sse_done_payload_preserves_runtime_threshold_when_cap_dropped():
+    """The terminal SSE usage payload must preserve threshold_tokens when it
     dropped the stale compressor cap, so the indicator doesn't revert on stream
     end (messages.js overwrites S.lastUsage with this payload)."""
     assert "_dropped_stale_cap_sse" in _STREAMING_SRC
-    assert "usage['threshold_tokens'] = int(_orig_cc_thresh_sse * _fb_cl / _orig_cc_cl_sse)" in _STREAMING_SRC, (
-        "SSE done payload must rescale threshold_tokens to the resolved window (#3263 MUST-FIX 3)"
+    assert "usage['threshold_tokens'] = _orig_cc_thresh_sse" in _STREAMING_SRC, (
+        "SSE done must report the actual compressor trigger"
     )
 
 

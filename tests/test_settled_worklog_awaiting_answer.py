@@ -237,7 +237,10 @@ def test_subagent_worklog_splits_at_each_interim_text():
 def test_webui_session_keeps_one_collapsed_worklog_per_turn():
     assert _render(WEBUI_SESSION, TWO_TURNS_RUNNING) == [True, True]
     layout = _render(WEBUI_SESSION, INTERLEAVED, LAST_TURN_LAYOUT)
-    assert layout[0] == "Gtrue" and layout.count("Gtrue") == 1
+    assert layout.count("Gtrue") == 1
+    # The fork's summary placement keeps the single disclosure beside the final
+    # visible prose, without regrouping the delegated-subagent timeline above.
+    assert layout.index("Gtrue") + 1 == layout.index("T7"), layout
 
 
 def test_foreign_cli_session_stays_collapsed():

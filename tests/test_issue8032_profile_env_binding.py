@@ -385,6 +385,7 @@ _RAW_LOADERS = {
 _WRITER = "writer: read-modify-write that must save the RAW document"
 _LOADER = "loader internal"
 _ALLOWED = {
+    ("config.py", "_save_yaml_config_file"): _WRITER,
     ("commands.py", "_run_codex_runtime_command._persist_config"): _WRITER,
     ("config.py", "set_max_tokens"): _WRITER,
     ("config.py", "set_reasoning_display"): _WRITER,

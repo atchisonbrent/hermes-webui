@@ -2113,17 +2113,7 @@ def _process_one(evt: dict) -> None:
             process_registry=_process_registry,
         )
         return
-    # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
-    # The real merged #2279 next-turn drain
-    # (api/streaming._drain_webui_process_notifications) dedupes ONLY via
-    # process_registry.is_completion_consumed() / _completion_consumed — it
-    # does NOT populate BG_TASK_COMPLETE_EVENTS_SEEN (that set is ours-original
-    # and private to this module). So the cross-A/B shared dedupe contract is
-    # process_registry._completion_consumed, NOT BG_TASK_COMPLETE_EVENTS_SEEN.
-    # If the upstream A-drain already delivered this process_id (A-first
-    # order), it marked _completion_consumed; B must early-return here or it
-    # would double-fire a wakeup. This guard aligns our B-drain to the real
-    # upstream key (verified against origin/master streaming.py).
+    # Honor core wait/log or a result already delivered by the next-turn path.
     if process_id:
         try:
             if _process_registry is not None and _process_registry.is_completion_consumed(process_id):
@@ -2134,16 +2124,14 @@ def _process_one(evt: dict) -> None:
                 "falling back to BG_TASK_COMPLETE_EVENTS_SEEN gate",
                 exc_info=True,
             )
-    # Secondary (ours-original) idempotency: if we've already emitted for this
-    # (session_id, process_id) pair via THIS module, skip the duplicate. Two
-    # _move_to_finished() callers (kill_process racing the reader thread) can
-    # occasionally enqueue twice despite the process_registry guard.
+    # Both queue consumers share routing ownership independently of delivery.
     with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
         seen = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
         if process_id and process_id in seen:
             return
         if process_id:
             seen.add(process_id)
+        _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
     payload = _build_payload(evt, session_id)
     _emit_bg_task_complete_events_coalesced(session_id, payload)
     _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
@@ -2176,7 +2164,9 @@ def _process_one(evt: dict) -> None:
     # Idempotency is already guaranteed above: BG_TASK_COMPLETE_EVENTS_SEEN +
     # the registry _completion_consumed marker mean this process_id reached
     # here at most once, so the wakeup turn starts at most once.
-    wakeup_prompt = ""
+    # Distinguish an unformattable event from a deliberately empty prompt.
+    # The former must retire routing state in the exception path below.
+    wakeup_prompt = None
     consumed_claimed_by_dispatch = False
     try:
         # ``wakeup_prompt`` is server-internal state used only by the
@@ -2187,7 +2177,11 @@ def _process_one(evt: dict) -> None:
         # prior _build_payload used).
         wakeup_prompt_raw = format_wakeup_prompt(evt)
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
-        if wakeup_prompt and _session_has_active_turn(session_id):
+        if not wakeup_prompt:
+            # No conversation delivery was attempted. Retire routing flags only,
+            # not the core result; a later meaningful event remains deliverable.
+            _retire_wakeup_ownership(session_id, [{'process_id': process_id}])
+        elif _session_has_active_turn(session_id):
             # Defer-path fix: persist the prompt so a turn-teardown
             # idle-hook can redeliver it once the session goes idle.
             # The OLD behavior only logged + left a bare
@@ -2247,6 +2241,8 @@ def _process_one(evt: dict) -> None:
                     consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                 )
     except Exception:
+        if wakeup_prompt is None:
+            _retire_wakeup_ownership(session_id, [{'process_id': process_id}])
         logger.warning(
             "server-side wakeup dispatch failed for session %s", session_id, exc_info=True
         )
@@ -2277,14 +2273,12 @@ def record_deferred_wakeup(
     *,
     consumed_claimed_by_dispatch: bool = False,
 ) -> bool:
-    """Persist a deferred process-completion wakeup for later redelivery.
+    """Queue a deferred wakeup while preserving retry-vs-agent-read provenance.
 
     Called from ``_process_one`` when a completion arrives while a turn is
     active (the Option Z drain branch cannot start a turn — it would 409).
-    The turn-teardown idle-hook (``drain_deferred_wakeups_for_session``)
-    redelivers it once the session goes idle, OR the PR #2279 next-turn drain
-    claims it if a user turn comes first. Whoever claims first wins (atomic
-    pop in ``claim_deferred_wakeups``); the other finds nothing.
+    The idle continuation can claim it. Claiming transfers ownership; it is not acknowledgment. Queue state
+    is in-memory (not durable across a WebUI process restart).
 
     ``consumed_claimed_by_dispatch`` records provenance for a retry created by a
     REJECTED dispatch: the idle branch claims the shared registry key before the
@@ -2303,6 +2297,10 @@ def record_deferred_wakeup(
     from api import config as _cfg
 
     try:
+        with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+            _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
+            if process_id:
+                _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(session_id, set()).add(process_id)
         with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
             entries = _cfg.DEFERRED_PROCESS_WAKEUPS.setdefault(session_id, [])
             # Idempotent per (process_id, wakeup_prompt).
@@ -2347,6 +2345,33 @@ def record_deferred_wakeup(
         return False
 
 
+def _unconsumed_wakeups(entries: list[dict]) -> list[dict]:
+    """Core wait/log acknowledgment remains effective after WebUI queues an event."""
+    try:
+        from tools.process_registry import process_registry
+        return [e for e in entries if not e.get("process_id")
+                or not process_registry.is_completion_consumed(e["process_id"])]
+    except Exception:
+        # Unknown is not acknowledged. Older agent builds retain idle delivery.
+        return entries
+
+
+def _retire_wakeup_ownership(session_id: str, entries: list[dict]) -> None:
+    """Release routing state after consumed output or a terminal disposition."""
+    from api import config as cfg
+    with cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+        seen = cfg.BG_TASK_COMPLETE_EVENTS_SEEN.get(session_id, set())
+        seen.difference_update(e.get("process_id") for e in entries)
+        # Next-turn delivery can leave consumed routing IDs in this same set.
+        pending = [
+            {"process_id": pid} for pid in seen
+            if not _deferred_entry_already_consumed({"process_id": pid})
+        ]
+        if not pending:
+            cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(session_id, None)
+            cfg.PENDING_BG_TASK_COMPLETIONS.discard(session_id)
+
+
 def claim_deferred_wakeups(session_id: str) -> list[dict]:
     """Atomically remove and return all deferred wakeups for *session_id*.
 
@@ -2364,7 +2389,11 @@ def claim_deferred_wakeups(session_id: str) -> list[dict]:
 
     try:
         with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
-            return _cfg.DEFERRED_PROCESS_WAKEUPS.pop(session_id, []) or []
+            entries = _cfg.DEFERRED_PROCESS_WAKEUPS.pop(session_id, []) or []
+        # Do not discard a retry here: a dispatch-transport marker has not yet
+        # proved observation by an agent. Delivery-time adjudication belongs to
+        # the drain and runner, which both carry the provenance explicitly.
+        return entries
     except Exception:
         logger.debug(
             "claim_deferred_wakeups failed for session %s", session_id, exc_info=True
@@ -2464,66 +2493,28 @@ def drain_deferred_wakeups_for_session(
         entries = claim_deferred_wakeups(session_id)
         if not entries:
             return 0
-        # The session-level PENDING marker is server-internal telemetry; the
-        # real delivery is the prompt(s) we just claimed. Discard it now that
-        # the deferred wakeups are owned by this teardown.
-        try:
-            _cfg.PENDING_BG_TASK_COMPLETIONS.discard(session_id)
-        except Exception:
-            logger.debug(
-                "PENDING discard failed for session %s", session_id, exc_info=True
-            )
+        # Keep PENDING while dispatch owns the batch; the reaper must not
+        # release routing ownership before admission succeeds or is disposed.
         started = 0
-        # #8363: only a completion the agent has NOT already consumed may wake
-        # it. The turn that just ended may have read this completion itself
-        # (``process(action="wait")`` / ``log`` → the producer's public
-        # ``is_completion_consumed`` contract). The mark is read at DELIVERY
-        # time, and the defer branch never writes it, so a mark here means a
-        # real read (or a duplicate copy the next-turn drain actually
-        # delivered) — except for an entry whose own rejected dispatch claimed
-        # the key as a transport dedupe: ``_deferred_entry_already_consumed``
-        # keeps that retry eligible without clearing the shared key.
+        # Delivery-time observation must distinguish an agent read from our own
+        # rejected-dispatch transport claim. Keep the fork's joined delivery and
+        # preserve each original process ID for retry, rather than turning the
+        # batch into one anonymous prompt or a chain of model calls.
         unread = [e for e in entries if not _deferred_entry_already_consumed(e)]
-        if len(unread) != len(entries):
-            logger.debug(
-                "turn-teardown idle-hook dropped %d deferred wakeup(s) for "
-                "session %s already read in the finished turn",
-                len(entries) - len(unread),
-                session_id,
-            )
-        # Greptile P1 fix: do NOT fire one daemon-threaded wakeup per entry in
-        # a tight loop. Each ``_start_server_side_wakeup_turn`` spawns a daemon
-        # thread that races for the per-session agent lock; only ONE can win,
-        # the rest 409. Since we already claimed + popped every entry (line
-        # ~938) and discarded the PENDING marker, the losers' prompts would be
-        # permanently lost. Instead: start exactly the FIRST prompt, and
-        # re-defer the remaining entries so each subsequent turn-teardown
-        # (or next-turn drain) delivers the next one — one wakeup per turn,
-        # which matches the single-prompt-per-turn design and the
-        # BG_TASK_COMPLETE_EVENTS_SEEN dedup (no double-fire).
-        leftover = [e for e in unread if str((e or {}).get("wakeup_prompt") or "").strip()]
-        if leftover:
-            first = leftover[0]
-            # Re-defer entries 2..N BEFORE starting the first turn, so they are
-            # already persisted if the first wakeup's own teardown re-runs this
-            # hook and tries to claim them. Preserve each entry's dispatch-claim
-            # provenance so a retry is never re-classified as an agent read.
-            for entry in leftover[1:]:
-                record_deferred_wakeup(
-                    session_id,
-                    str((entry or {}).get("process_id") or ""),
-                    str((entry or {}).get("wakeup_prompt") or "").strip(),
-                    consumed_claimed_by_dispatch=bool(
-                        (entry or {}).get("consumed_claimed_by_dispatch")
-                    ),
-                )
+        consumed = [e for e in entries if e not in unread]
+        if consumed:
+            _retire_wakeup_ownership(session_id, consumed)
+        pending = [e for e in unread if str((e or {}).get('wakeup_prompt') or '').strip()]
+        if pending:
+            batch_args = {'entries': pending} if len(pending) > 1 else {}
             _start_server_side_wakeup_turn(
                 session_id,
-                str((first or {}).get("wakeup_prompt") or "").strip(),
-                process_id=str((first or {}).get("process_id") or ""),
+                "\n\n".join(e["wakeup_prompt"].strip() for e in pending),
+                process_id=str(pending[0].get("process_id") or ""),
                 retry_attempt=retry_attempt,
+                **batch_args,
                 consumed_claimed_by_dispatch=bool(
-                    (first or {}).get("consumed_claimed_by_dispatch")
+                    pending[0].get("consumed_claimed_by_dispatch")
                 ),
             )
             started = 1
@@ -2621,6 +2612,7 @@ def _start_server_side_wakeup_turn(
     *,
     process_id: str = "",
     retry_attempt: int = 0,
+    entries: list[dict] | None = None,
     consumed_claimed_by_dispatch: bool = False,
 ) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
@@ -2676,21 +2668,27 @@ def _start_server_side_wakeup_turn(
     """
 
     def _runner() -> None:
+        queued = entries if entries is not None else [{
+            "process_id": process_id,
+            "wakeup_prompt": wakeup_prompt,
+            "consumed_claimed_by_dispatch": consumed_claimed_by_dispatch,
+        }]
+        pending = [e for e in queued if not _deferred_entry_already_consumed(e)]
+        if not pending:
+            _retire_wakeup_ownership(session_id, queued)
+            return
+        prompt = "\n\n".join(e["wakeup_prompt"] for e in pending)
         try:
             from api.routes import start_session_turn
 
             resp = start_session_turn(
                 session_id,
-                wakeup_prompt,
+                prompt,
                 source="process_wakeup",
                 process_id=process_id,
                 retry_attempt=retry_attempt,
-                rearm_deferred_wakeup=True,
-                # Thread the transport-claim provenance into the launch-abort
-                # re-arm (#8363 review). The one-shot retry timer can fire
-                # before this abort's exception reaches our ``except`` below;
-                # the drain it triggers must already see an entry tagged as
-                # dispatch-claimed instead of reading it as an agent read.
+                # Preserve individual identity on a joined delivery.
+                rearm_deferred_wakeup=len(pending) == 1,
                 consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
             )
             status = int((resp or {}).get("_status", 200) or 200)
@@ -2703,12 +2701,20 @@ def _start_server_side_wakeup_turn(
                 # for the removed session (including a pre-existing entry from
                 # before the deletion) and do NOT re-queue.
                 discard_deferred_wakeups_for_session(session_id)
+                for entry in pending:
+                    if entry.get("process_id"):
+                        _mark_registry_completion_consumed(entry["process_id"])
+                _retire_wakeup_ownership(session_id, pending)
                 logger.info(
                     "server-side wakeup dropped for deleted session %s "
                     "(404 session-not-found): queued wakeup state cleared",
                     session_id,
                 )
             elif status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                for entry in pending:
+                    if entry.get("process_id"):
+                        _mark_registry_completion_consumed(entry["process_id"])
+                _retire_wakeup_ownership(session_id, pending)
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
                     session_id,
@@ -2724,12 +2730,10 @@ def _start_server_side_wakeup_turn(
                 # ``claim_deferred_wakeups`` still guarantees exactly-once
                 # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
                 # this process_id, so re-recording cannot double-fire.
-                if wakeup_prompt:
+                for entry in pending:
                     record_deferred_wakeup(
-                        session_id,
-                        process_id,
-                        wakeup_prompt,
-                        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+                        session_id, entry['process_id'], entry['wakeup_prompt'],
+                        consumed_claimed_by_dispatch=bool(entry.get('consumed_claimed_by_dispatch')),
                     )
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
@@ -2737,35 +2741,41 @@ def _start_server_side_wakeup_turn(
                     session_id,
                 )
             elif status >= 400:
-                # The turn never started, and whoever called us
-                # (``drain_deferred_wakeups_for_session``) already popped this
-                # prompt from DEFERRED_PROCESS_WAKEUPS — so dropping it here
-                # loses the wakeup permanently. Keep it queued so a later turn
-                # teardown (or the next-turn drain) still delivers it. This is
-                # the "launch-abort retry's own launch failed" case: the prompt
-                # must survive, and it must NOT loop — the retry timer is
-                # one-shot and nothing here reschedules it.
-                if wakeup_prompt:
-                    record_deferred_wakeup(
-                        session_id,
-                        process_id,
-                        wakeup_prompt,
-                        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
-                    )
+                if not (status == 404 and (resp or {}).get('error') == 'Session not found'):
+                    for entry in pending:
+                        record_deferred_wakeup(
+                            session_id, entry['process_id'], entry['wakeup_prompt'],
+                            consumed_claimed_by_dispatch=bool(entry.get('consumed_claimed_by_dispatch')),
+                        )
+                    if (status == 503 and (resp or {}).get('status') == 'restart_draining'
+                            and (resp or {}).get('retryable') is True):
+                        # A typed pre-admission refusal proves non-execution. Keep
+                        # one bounded retry without spending the launch budget.
+                        from api.routes import _schedule_deferred_wakeup_retry
+                        _schedule_deferred_wakeup_retry(
+                            session_id, retry_attempt=retry_attempt, refund_attempt=True)
+                else:
+                    for entry in pending:
+                        if entry.get('process_id'):
+                            _mark_registry_completion_consumed(entry['process_id'])
+                    _retire_wakeup_ownership(session_id, pending)
                 logger.warning(
-                    "server-side wakeup failed for session %s: status=%s err=%r; "
-                    "prompt kept queued for later delivery",
+                    "server-side wakeup refused for session %s: status=%s err=%r",
                     session_id,
                     status,
                     (resp or {}).get("error"),
                 )
             else:
+                for entry in pending:
+                    if entry.get("process_id"):
+                        _mark_registry_completion_consumed(entry["process_id"])
+                _retire_wakeup_ownership(session_id, pending)
                 logger.info(
                     "server-side wakeup turn started for session %s (stream_id=%s)",
                     session_id,
                     (resp or {}).get("stream_id"),
                 )
-        except Exception:
+        except Exception as exc:
             # A launch that RAISED (worker-thread construction/``start()``
             # failure, session-load throw, model-resolution blow-up, …) is the
             # same loss case as a 5xx: the entry was already claimed, so
@@ -2774,13 +2784,18 @@ def _start_server_side_wakeup_turn(
             # launch-abort re-arm inside ``start_session_turn`` handles the
             # narrower worker-start failure; this covers everything that
             # escapes before/around it.)
-            if wakeup_prompt:
+            for entry in pending:
                 record_deferred_wakeup(
-                    session_id,
-                    process_id,
-                    wakeup_prompt,
-                    consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+                    session_id, entry['process_id'], entry['wakeup_prompt'],
+                    consumed_claimed_by_dispatch=bool(entry.get('consumed_claimed_by_dispatch')),
                 )
+            cleanup = getattr(exc, '_chat_start_cleanup_result', None)
+            if (len(pending) > 1 and retry_attempt <= 0
+                    and isinstance(cleanup, dict) and cleanup.get('sidecar_restored') is True):
+                # Only a compensated pre-worker launch proves non-execution. Other
+                # exceptions retain the queue without an automatic replay loop.
+                from api.routes import _schedule_deferred_wakeup_retry
+                _schedule_deferred_wakeup_retry(session_id)
             logger.warning(
                 "server-side wakeup turn raised for session %s; prompt kept "
                 "queued for later delivery",

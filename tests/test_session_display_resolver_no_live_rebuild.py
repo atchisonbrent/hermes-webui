@@ -53,6 +53,11 @@ def cold_models_cache(monkeypatch):
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
     monkeypatch.setattr(cfg, "_delete_models_cache_on_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: None)
+    # The invariant is cache-only resolution, not repair after a profile-provider
+    # switch. A prior suite test may leave a different profile default on disk.
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_a, **_k:
+                        ("anthropic", "claude-sonnet-4-6", {"model": {"provider": "anthropic", "default": "claude-sonnet-4-6"}}))
     yield
 
 

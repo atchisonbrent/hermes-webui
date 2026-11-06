@@ -184,7 +184,7 @@ def test_stream_done_collapses_in_place_after_disarm_with_render_fallback():
         "to snapshot the live (not expanded-worklog) DOM positions."
     )
     disarm_idx = MESSAGES_JS.index("_disarmKeepSettledWorklogOpen()")
-    after = MESSAGES_JS[disarm_idx : disarm_idx + 1100]
+    after = MESSAGES_JS[disarm_idx : MESSAGES_JS.index("// TTS auto-read", disarm_idx)]
     # #6414: the preferred collapse is now in-place. The old second full
     # transcript render remains only as a fail-closed fallback when the exact
     # settled Worklog cannot be identified or collapsed.
@@ -198,7 +198,7 @@ def test_stream_done_collapses_in_place_after_disarm_with_render_fallback():
         "the in-place collapse path must still restore the pre-captured live scroll "
         "snapshot so pinned and unpinned readers keep their viewport."
     )
-    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot})" in after, (
+    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot,reuseSettledTurns:true})" in after, (
         "if in-place collapse cannot prove it owns the exact settled Worklog, the "
         "STREAM_DONE handler must fall back to the old scroll-preserving render pass."
     )
@@ -260,7 +260,7 @@ def test_done_defers_live_dom_removal_but_other_terminal_paths_still_clear():
     """
     clear_live = _extract("clearLiveToolCards")
     done_start = MESSAGES_JS.index("source.addEventListener('done',e=>{")
-    done = MESSAGES_JS[done_start : done_start + 14000]
+    done = MESSAGES_JS[done_start:].split("\n    source.addEventListener(", 1)[0]
     harness = textwrap.dedent(f"""
         let removed = 0;
         let timerClears = 0;

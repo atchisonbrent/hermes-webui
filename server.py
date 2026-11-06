@@ -110,7 +110,7 @@ logger = logging.getLogger(__name__)
 from api.request_logging import emit_request_log
 from api.routes import request_log_forwarded_fields  # #7863
 from api.auth import check_auth_or_close, reset_trusted_auth_request_state
-from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
+from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE, clear_startup_restart_drain
 from api.helpers import (
     j,
     advertise_connection_close,
@@ -558,6 +558,8 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 
 
 def main() -> None:
+    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+    clear_startup_restart_drain()
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND, _AGENT_DIR
 
     _ignore_sigpipe()

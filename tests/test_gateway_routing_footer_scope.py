@@ -337,6 +337,9 @@ function _messageVirtualWindowKeyFor() { return 'all'; }
 function _messageRenderCacheSignature() { return 'sig'; }
 function _compressionStateForCurrentSession() { return null; }
 function clearCompressionUi() {}
+// Receipt rendering is unrelated to the message-foot attribution under test.
+function _renderUserInputReceipts() {}
+function _placeSettledCompactWorklogs() {}
 function _handoffStateForCurrentSession() { return null; }
 function _captureWorklogDetailDisclosureState() { return null; }
 function _latestCompressionReferenceMessage() { return { message: null, rawIdx: -1 }; }

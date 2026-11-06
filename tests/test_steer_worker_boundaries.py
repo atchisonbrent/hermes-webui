@@ -56,13 +56,14 @@ def worker_scene(tmp_path, monkeypatch):
                             on_drain=lambda: None, calls=[], drained=[], result=None)
 
     class FakeAgent:
-        def __init__(self, **kwargs):
+        def __init__(self, reasoning_config=None, **kwargs):
             self.session_id = kwargs.get("session_id")
             self.context_compressor = None
             self.session_prompt_tokens = self.session_completion_tokens = 0
             self.session_cache_read_tokens = self.session_cache_write_tokens = 0
             self.session_estimated_cost_usd = None
-            self.reasoning_config = self.ephemeral_system_prompt = self._last_error = None
+            self.reasoning_config = reasoning_config
+            self.ephemeral_system_prompt = self._last_error = None
             self.pending = []
             self.pending_lock = threading.Lock()
             scene.agent = self
@@ -263,6 +264,10 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
             streaming._handle_chat_steer(handler, {"session_id": "original", "text": "guidance"})
             result = _captured_response(handler)
             if first == "steer":
+                receipt = result.pop('user_input')
+                assert result.pop('display_recorded') is True
+                assert receipt['kind'] == 'steer' and receipt['content'] == 'guidance'
+                assert receipt['stream_id'] == 'run'
                 assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
             else:
                 assert result == {"accepted": False, "fallback": "not_running", "stream_id": "run"}
@@ -278,6 +283,46 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
     assert scene.agent.pending == []
     assert finalizing_edges == [True], "final drain admission must close under the stream lock"
     assert "run" not in config.ACTIVE_RUNS
+
+
+@pytest.mark.parametrize('owner', ['original', 'other', None])
+def test_claimed_worker_respects_owner_during_drain(worker_scene, monkeypatch, tmp_path, owner):
+    import os
+
+    scene = worker_scene
+    drain_dir = tmp_path / 'drain'
+    drain_dir.mkdir()
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(drain_dir))
+    monkeypatch.setattr(config, 'PRE_ADMISSION_CLAIMS', {})
+    config.STREAM_SESSION_OWNERS['run'] = owner
+    assert config.publish_pre_admission_claim('run')
+    (drain_dir / f'{os.getpid()}.json').write_text('{}\n')
+    scene.run()
+    assert scene.calls.count('run') == (1 if owner == 'original' else 0)
+    errors = [payload for event, payload in list(scene.events.queue) if event == 'apperror']
+    if owner == 'original':
+        assert not errors
+        assert scene.session.active_stream_id is None
+        assert scene.session.pending_user_message is None
+    else:
+        assert any(item.get('type') == 'restart_draining' for item in errors)
+    assert 'run' not in config.PRE_ADMISSION_CLAIMS
+
+
+@pytest.mark.parametrize('backend', ['local', 'gateway'])
+def test_runtime_uses_selected_model_reasoning_override(worker_scene, monkeypatch, backend):
+    from api import gateway_chat
+
+    cfg = {'agent': {'reasoning_effort': 'high', 'reasoning_overrides': {'test-model': 'low'}}}
+    monkeypatch.setattr(config, 'get_config', lambda *a, **kw: cfg)
+    monkeypatch.setattr(config, 'resolve_model_reasoning_efforts', lambda *a, **kw: ['low', 'high'])
+    if backend == 'local':
+        worker_scene.run()
+        result = worker_scene.agent.reasoning_config
+    else:
+        effort = gateway_chat._gateway_reasoning_effort_for_request(cfg, model='test-model', model_provider='openai')
+        result = config.parse_reasoning_effort(effort)
+    assert result == {'enabled': True, 'effort': 'low'}
 
 
 def test_successfully_registered_new_agent_remains_cached(worker_scene):

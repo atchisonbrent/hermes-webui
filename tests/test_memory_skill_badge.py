@@ -137,7 +137,7 @@ def test_classification_persisted_as_durable_dom_attributes():
     # (a) buildToolCard stamps durable attributes for classified rows
     assert "data-memory-save" in _UI_JS, "buildToolCard must stamp a durable memory flag"
     assert "data-skill-update" in _UI_JS, "buildToolCard must stamp a durable skill flag"
-    build_start = _UI_JS.index("function buildToolCard(tc)")
+    build_start = _UI_JS.index("function buildToolCard(")
     build_end = _UI_JS.index("\nfunction ", _UI_JS.index("return row;", build_start))
     build_block = _UI_JS[build_start:build_end]
     assert "setAttribute('data-memory-save'" in build_block

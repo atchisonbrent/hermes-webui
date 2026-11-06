@@ -8,9 +8,13 @@ MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 def _chat_error_handler() -> str:
-    return MESSAGES_JS.split("source.addEventListener('error',async e=>{", 1)[1].split(
+    handler = MESSAGES_JS.split("source.addEventListener('error',async e=>{", 1)[1].split(
         "source.addEventListener('cancel'", 1
     )[0]
+    assert "await _retryStreamAfterError(source);" in handler
+    start = MESSAGES_JS.index("  async function _retryStreamAfterError(source){")
+    end = MESSAGES_JS.index("\n  }", start)
+    return MESSAGES_JS[start:end]
 
 
 def test_visible_unfocused_current_session_still_attempts_sse_reconnect():

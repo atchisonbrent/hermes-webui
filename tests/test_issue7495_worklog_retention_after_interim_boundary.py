@@ -110,7 +110,7 @@ function _matchesSelector(node, sel){
 
 
 def _retention_harness(*, group_attrs) -> str:
-    production = _extract_js_function("renderLiveAnchorActivityScene")
+    production = _extract_js_function("renderLiveAnchorActivityScene") + "\n" + _extract_js_function("_liveSceneRowsWithUserInputs")
     attrs_js = json.dumps(group_attrs)
     body = """
 const calls = { freshGroup: 0 };

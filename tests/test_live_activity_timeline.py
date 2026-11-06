@@ -59,7 +59,7 @@ def test_per_segment_tool_activity_does_not_include_run_metadata_rows():
 
 def test_tool_activity_uses_tool_cards_and_run_activity_owns_timer():
     assert "buildToolCard(tc)" in UI_JS
-    build_fn = UI_JS.split("function buildToolCard(tc)", 1)[1].split("function _syncToolCallGroupSummary", 1)[0]
+    build_fn = UI_JS.split("function buildToolCard(tc, options)", 1)[1].split("function _syncToolCallGroupSummary", 1)[0]
     assert "tool-card-duration" not in build_fn
     assert "tool-worklog-list" in UI_JS
     assert "tool-worklog-summary" in UI_JS
@@ -122,7 +122,7 @@ def test_settled_worklog_can_move_anchor_text_into_reason():
 def test_settled_render_skips_empty_activity_buckets():
     render_fn = UI_JS.split("for(const entry of activityOrder){", 1)[1].split("// Render per-turn duration", 1)[0]
     assert "const anchorReasonHtml=_worklogReasonHtmlFromAnchor(anchorRow);" in render_fn
-    assert "if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;" in render_fn
+    assert "if(!cards.length&&!anchorReasonHtml&&!thinkingText&&!(isCompactWorklogMode()&&_assistantDisplayCommentary(S.messages[aIdx]).length)) continue;" in render_fn
 
 
 def test_reattach_normalizes_live_activity_group_placement_by_burst_anchor():
@@ -179,6 +179,7 @@ function msgContent(m){{
 {has_reasoning_fn}
 {empty_placeholder_fn}
 {anchor_scene_final_fn}
+{_function_source(UI_JS, "_assistantDisplayCommentary")}
 {has_visible_fn}
 {reasoning_fn}
 {anchor_fn}

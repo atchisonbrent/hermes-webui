@@ -54,7 +54,7 @@ vm.runInContext(APPEND,sandbox);
 // For legacy fallback, observe arguments at the append boundary instead.
 if(!opts.restored_scene) sandbox.appendLiveToolCard=(tc)=>appended.push(tc.tid||'unkeyed');
 vm.runInContext(REPLAY+'\nreplayPersistedLiveToolCards('+JSON.stringify({skipUnkeyedRestoredDuplicates:opts.skip_unkeyed})+');',sandbox);
-console.log(JSON.stringify({redraws,appended}));
+console.log(JSON.stringify({redraws,appended,tools:tools.length}));
 """.replace('APPEND', json.dumps(append)).replace('REPLAY', json.dumps(replay))
     result = subprocess.run(
         [NODE or 'node', '-e', script, json.dumps({
@@ -69,6 +69,7 @@ console.log(JSON.stringify({redraws,appended}));
 def test_restored_complete_scene_is_not_redrawn_per_saved_tool(count):
     result = replay_probe(True, count)
     assert result['redraws'] == 0, result
+    assert result['tools'] == count + 1  # No stored activity was dropped.
 
 
 def test_non_anchor_restore_still_replays_keyed_tools():

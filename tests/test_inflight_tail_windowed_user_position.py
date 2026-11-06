@@ -41,7 +41,12 @@ def _helper_src() -> str:
     start = src.find("function _messageComparableText")
     end = src.find("// Load older messages", start)
     assert start != -1 and end != -1, "sessions.js helper slice markers not found"
-    return src[start:end]
+    helpers = src[start:end]
+    for name in ("_captureLoadedMessageWindow", "_loadedMessageBoundarySignature", "_preserveLoadedMessageWindow", "_restoreActiveTurnWindowBoundary", "_reconcileRunningMessageWindow", "_prependedRunningHistory"):
+        if "function " + name + "(" not in helpers:
+            helpers += "\n" + _function(src, name)
+    # These fixtures contain no user-input receipts; receipt UI is tested separately.
+    return helpers + "\nfunction _adoptUserInputReceipts() {}\n"
 
 
 def _function(src: str, name: str) -> str:

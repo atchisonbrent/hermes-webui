@@ -133,7 +133,7 @@ def test_stop_after_registration_before_cache_or_invocation(worker_scene, monkey
                             scene.session.pending_user_message = None
                         else:
                             config.AGENT_INSTANCES["successor"] = successor
-                            config.register_active_run("successor", session_id="original", backend="legacy")
+                            config.register_active_run("successor", session_id="original", backend="legacy", streams_lock_held=True)
                         if cancellation == "same-agent-successor":
                             with successor.pending_lock:
                                 successor.pending.append("Successor-only guidance")

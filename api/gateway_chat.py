@@ -25,6 +25,7 @@ from api.config import (
     STREAM_LIVE_TOOL_CALLS,
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
+    RunAdmissionDrainingError,
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
@@ -432,14 +433,16 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
 
 
 def _gateway_reasoning_effort_for_request(
-    cfg, *, model=None, model_provider=None, session_effort=None
+    cfg, *, model=None, model_provider=None, configured_model=None,
+    session_effort=None,
 ):
-    """Resolve and coerce the session effort, falling back to profile config."""
+    """Preserve an explicit session choice, then model/profile defaults."""
     try:
+        # A legacy/defaulting request needs the persisted model's override,
+        # not the override belonging to a merely coerced/fallback runtime ID.
+        lookup_model = model if session_effort is not None else (configured_model or model)
         coerced = resolve_session_reasoning_effort(
-            cfg,
-            session_effort=session_effort,
-            model_id=model,
+            cfg, session_effort=session_effort, model_id=lookup_model,
             provider_id=model_provider,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
@@ -2277,7 +2280,9 @@ def _settle_delegation_reservation(session_id, stream_id, accepted: bool) -> Non
 def _resume_gateway_run_for_session(session) -> bool:
     from api.config import create_stream_channel, register_session_writeback_owner, register_stream_owner
 
-    run = (session.gateway_run if session is not None else None) or {}
+    if session is None:
+        return False
+    run = session.gateway_run or {}
     stream_id = str(run.get("stream_id") or "")
     # A persisted run is the authority whatever the process default backend is.
     if not stream_id or not (run.get("run_id") or run.get("request")) or session.active_stream_id != stream_id:
@@ -2297,27 +2302,30 @@ def _resume_gateway_run_for_session(session) -> bool:
     with STREAMS_LOCK:
         if stream_id in STREAMS:
             return False
-        # The record being reattached was loaded from the saved session: a restart
-        # can reattach it again, so it is not WebUI-owned drain work (#7293). Durable
-        # before the drain can see the stream, so no settle ever selects it.
+        # The reattached run is durable before publication. The common
+        # registration below owns the actual channel after admission succeeds.
         _mark_gateway_run_durable(stream_id)
-        STREAMS[stream_id] = create_stream_channel()
-        CANCEL_FLAGS[stream_id] = CANCEL_FLAGS.get(stream_id, threading.Event())
         # Ownership token: Stop can detach this stream (and a successor could even
         # register the same id) before the worker admits it, so the early-return
         # teardown must retire exactly THIS claim and never someone else's row.
         claim_token = uuid.uuid4().hex
-        register_active_run(
-            stream_id,
-            session_id=sid,
-            started_at=time.time(),
-            phase="gateway-reattached",
-            claim_token=claim_token,
-            workspace=str(session.workspace or ""),
-            model=session.model,
-            provider=session.model_provider,
-            backend="gateway",
-        )
+        try:
+            register_active_run(
+                stream_id,
+                streams_lock_held=True,
+                session_id=sid,
+                started_at=time.time(),
+                phase="gateway-reattached",
+                claim_token=claim_token,
+                workspace=str(session.workspace or ""),
+                model=session.model,
+                provider=session.model_provider,
+                backend="gateway",
+            )
+        except RunAdmissionDrainingError:
+            return False
+        STREAMS[stream_id] = create_stream_channel()
+        CANCEL_FLAGS[stream_id] = CANCEL_FLAGS.get(stream_id, threading.Event())
     register_stream_owner(stream_id, sid)
     register_session_writeback_owner(sid, stream_id)
     _mark_gateway_run_starting(stream_id)
@@ -3017,6 +3025,7 @@ def _run_gateway_chat_streaming(
     """
     cancel_event = threading.Event()
     q = peek_stream(stream_id)
+    draining = False
     if q is not None:
         # A snapshot lookup is not admission. A concurrent chat/start can classify
         # this stream as an orphan (registered, no live worker, no pending turn in
@@ -3038,22 +3047,47 @@ def _run_gateway_chat_streaming(
                 STREAM_PARTIAL_TEXT[stream_id] = ""
                 STREAM_REASONING_TEXT[stream_id] = ""
                 STREAM_LIVE_TOOL_CALLS[stream_id] = []
-                register_active_run(
-                    stream_id,
-                    session_id=session_id,
-                    started_at=time.time(),
-                    phase="gateway-starting",
-                    workspace=str(workspace),
-                    model=model,
-                    provider=model_provider,
-                    backend="gateway",
-                )
-                # Worker admission ends the launch phase (#7302 finding 5): retire
-                # the claim published at registration. Ownership lives in
-                # ACTIVE_RUNS from here on.
-                from api.config import retire_pre_admission_claim_if_owned
+                try:
+                    register_active_run(
+                        stream_id,
+                        streams_lock_held=True,
+                        session_id=session_id,
+                        started_at=time.time(),
+                        phase="gateway-starting",
+                        workspace=str(workspace),
+                        model=model,
+                        provider=model_provider,
+                        backend="gateway",
+                    )
+                except RunAdmissionDrainingError:
+                    draining = True
+                else:
+                    # Worker admission ends the launch phase (#7302 finding 5): retire
+                    # the claim published at registration. Ownership lives in
+                    # ACTIVE_RUNS from here on.
+                    from api.config import retire_pre_admission_claim_if_owned
 
-                retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
+                    retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
+    if draining:
+        if q is not None:
+            q.put_nowait((
+                "apperror",
+                {
+                    "type": "restart_draining",
+                    "retryable": True,
+                    "message": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                    "session_id": session_id,
+                },
+            ))
+        _finish_gateway_run_starting(stream_id)
+        _clear_gateway_run_starting(stream_id)
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        release_stream_owned_registries(stream_id, session_id=session_id)
+        release_gateway_stream_state(stream_id)
+        if reattach_claim_token:
+            unregister_active_run_if_owned(stream_id, claim_token=reattach_claim_token)
+        return
     if q is None:
         _finish_gateway_run_starting(stream_id, result="fallback")
         _clear_gateway_run_starting(stream_id)
@@ -3129,33 +3163,31 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        from api.config import get_config  # imported lazily to avoid config-cycle churn
+        from api.config import get_config_for_profile_home
+        from api.profiles import get_hermes_home_for_profile
 
-        # Profile-bound like the endpoint below: the worker thread has no request profile TLS.
-        cfg = _gateway_config_for_profile(getattr(s, "profile", None)) or get_config()
-        # A legacy session (no stored effort) inherits agent.reasoning_effort from its
-        # own profile's isolated config, as the composer chip and the local worker do:
-        # cfg above still honours an ambient HERMES_CONFIG_PATH for a named profile.
+        # No request TLS exists on this worker: read the session's own isolated
+        # profile, never the process-active profile or an external named override.
+        _session_home = get_hermes_home_for_profile(getattr(s, 'profile', None))
+        cfg = get_config_for_profile_home(_session_home, isolate_config_override=True)
+        prompt_cfg = cfg  # retained for the prefill/profile branch below
         session_effort = getattr(s, "reasoning_effort", None)
         try:
             from api.config import effective_session_reasoning_effort
-            from api.profiles import get_hermes_home_for_profile
-
             session_effort = effective_session_reasoning_effort(
-                session_effort, get_hermes_home_for_profile(getattr(s, "profile", None)),
+                session_effort, _session_home,
+                model_id=persisted_model or model,
             )
         except Exception:
-            logger.warning("isolated reasoning config read failed; using the session config", exc_info=True)
+            logger.warning('isolated reasoning config read failed; using the session config', exc_info=True)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
             model_provider=model_provider,
             session_effort=session_effort,
+            configured_model=persisted_model or model,
         )
-        # The session's own profile, not the process-active one: this worker thread has no
-        # thread-local profile, so get_config()/os.environ describe whichever profile the
-        # process loaded. Same resolver the restart-reattach path already uses.
-        base_url, api_key = reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None))
+        base_url, api_key = reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, 'profile', None))
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:
@@ -3181,7 +3213,7 @@ def _run_gateway_chat_streaming(
                 _webui_ephemeral_system_prompt,
             )
 
-            prefill_context = _load_webui_prefill_context(cfg)
+            prefill_context = _load_webui_prefill_context(prompt_cfg)
             # #3324: the WebUI session/delivery context (connected platforms,
             # home channels, delivery hints, session framing) is now carried in
             # the ephemeral system prompt rather than a prefill `user` message.
@@ -3189,15 +3221,16 @@ def _run_gateway_chat_streaming(
             # context is not silently dropped on Gateway-routed WebUI chats.
             _gateway_system_prompt = _webui_ephemeral_system_prompt(
                 None,
+                personality_name=getattr(s, "personality", None),
                 surface_context={
                     "source": "webui",
                     "session_id": session_id,
                     "profile": getattr(s, "profile", None),
                     "workspace": s.workspace if s is not None else str(workspace),
                 },
-                config_data=cfg,
+                config_data=prompt_cfg,
             )
-            prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
+            prefill_messages = _prefill_messages_with_webui_context(prefill_context, prompt_cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
             prefill_messages = [
                 {"role": "system", "content": _gateway_system_prompt},

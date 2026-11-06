@@ -692,7 +692,8 @@ def _btw_fixtures(monkeypatch, parent_sid):
     with config.STREAMS_LOCK:
         config.STREAMS.clear()
 
-    parent = _make_session(parent_sid)
+    parent = models.Session(session_id=parent_sid)
+    parent.__dict__.update(vars(_make_session(parent_sid)))
     models.SESSIONS[parent_sid] = parent
 
     monkeypatch.setattr(

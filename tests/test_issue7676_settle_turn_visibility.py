@@ -378,7 +378,7 @@ class TestTransparentSettleInPlace:
         )
         # The fallback full rebuild must remain for everything that does not
         # finalize in place (compact worklog, no scene, blank result).
-        assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot})" in window
+        assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot,reuseSettledTurns:true})" in window
         assert "!_settledInPlace&&typeof _renderMessagesWithScrollSnapshot" in window
 
     def test_finalizer_source_only_returns_true_when_visible(self):

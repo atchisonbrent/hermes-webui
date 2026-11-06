@@ -114,6 +114,8 @@ def _live_render_ownership_harness(*, move_to_bottom: bool) -> str:
     js = UI_JS_PATH.read_text(encoding="utf-8")
     functions = [
         "renderLiveAnchorActivityScene",
+        "_liveSceneRowsWithUserInputs",
+        "_anchorScenePlaceChildren",
         "_freshProgrammaticScrollActive",
         "_recordNonMessageScrollIntent",
         # The wheel/key/drag input handlers delegate the generation bump to this

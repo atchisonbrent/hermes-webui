@@ -563,12 +563,14 @@ global._decorateTransparentEventRow=(row,opts)=>{
 global._rehydrateTransparentLiveRow=()=>{};
 global._sanitizeThinkingDisplayText=value=>String(value||'').trim();
 global._firstValidTimestampSeconds=()=>null;
+document.documentElement={lang:'en'};
 
 eval(anchorsSrc);
 for(const name of [
   'chatActivityMode','isTransparentStream','isFinalAnswerOnlyMode','isCompactWorklogMode','isSimplifiedToolCalling',
   '_anchorSceneIsSettledSuccessfulCompression','_anchorSceneRowsForRendering',
-  '_anchorSceneToolRenderSignature','_anchorSceneDataRowKey','_anchorScenePlaceChildren',
+  '_worklogDetailsExpandedDefault','_anchorSceneToolRenderSignature','_anchorSceneRetainedRowSignature','_anchorSceneDataRowKey','_anchorScenePlaceChildren',
+'_syncTransparentEventTimestampVisibility',
   '_anchorSceneRowTimestampSeconds','_anchorSceneTransparentNodeForRow',
   '_transparentLiveRowKey','_transparentLiveRowsCompatible',
   '_transparentLiveRowAttributePairs','_transparentLiveRowInteractiveState',
@@ -580,6 +582,7 @@ for(const name of [
   'isLiveAnchorActivitySceneOwner','_projectLiveAnchorActivitySceneForStream',
   '_restoreLiveAnchorScrollSnapshotAfterRebuild',
   '_renderLiveAnchorActivitySceneTransparent','renderLiveAnchorActivityScene',
+  '_liveSceneRowsWithUserInputs',
   '_renderLiveAnchorActivitySceneForStream','appendThinking','updateThinking',
 ]) eval(extractFunc(uiSrc,name));
 

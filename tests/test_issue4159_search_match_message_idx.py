@@ -493,11 +493,12 @@ global._messagesGeneration=0;
 global._bumpMessagesGeneration=()=>{_messagesGeneration++;};
 let synced=0;
 global._syncToolCallsForLoadedMessages=()=>{synced++;};
+global._adoptUserInputReceipts=()=>{}; // No receipts in these message-search fixtures.
 global._advanceVisibleBaselineForServerKnownRows=()=>{};
 let release=null, calls=0;
 global.api=()=>{calls++;return new Promise(r=>{release=()=>r({session:{session_id:'a',messages:FULL.slice(),
   tool_calls:[],message_count:10,visible_message_count:10}});});};
-for(const name of ['_transcriptFreshnessSnapshot','_transcriptIsFresh','_ensureAllMessagesLoaded']) eval(extractFrom(src,name));
+for(const name of ['_transcriptFreshnessSnapshot','_transcriptIsFresh','_reconcileRunningMessageWindow','_ensureAllMessagesLoaded']) eval(extractFrom(src,name));
 (async()=>{
   const p=_ensureAllMessagesLoaded(scenario.opts);
   await new Promise(r=>setImmediate(r));

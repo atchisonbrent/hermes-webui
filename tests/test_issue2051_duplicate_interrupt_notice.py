@@ -124,6 +124,8 @@ def test_stale_live_marker_never_folds_the_turn_final_answer():
 const FINAL={isTurnFinalAssistant:true};
 const MID={isTurnFinalAssistant:false};
 const owners=new Set([0]);
+let compactMode=false;
+function isCompactWorklogMode(){ return compactMode; }
 
 // The bug: the settled turn-final answer folds on a stale live marker.
 assert.strictEqual(
@@ -184,6 +186,9 @@ assert.strictEqual(
 assert.strictEqual(
   _assistantMessageBelongsInWorklog(assistant('mid',{_activityBurstId:2}),0,new Set(),undefined,MID),
   true, 'activity-burst anchors still fold');
+compactMode=true;
+assert.strictEqual(_assistantMessageBelongsInWorklog(assistant('progress'),0,owners,undefined,MID),false);
+assert.strictEqual(_assistantMessageBelongsInWorklog(assistant('answer'),0,owners,undefined,FINAL),false);
 console.log('OK');
 """
     run_node(script)

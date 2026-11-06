@@ -68,7 +68,11 @@ def steer():
 
 
 def test_gateway_steer_is_delivered_to_the_live_run(gateway):
-    assert steer() == {"accepted": True, "fallback": None, "stream_id": "run"}
+    result = steer()
+    assert {key: result[key] for key in ("accepted", "fallback", "stream_id")} == {"accepted": True, "fallback": None, "stream_id": "run"}
+    assert result["display_recorded"] is True
+    assert result["user_input"]["content"] == "go left"
+    assert result["user_input"]["kind"] == "steer"
     assert gateway.calls == [("/v1/runs/run_1/steer", {"input": "go left"}, "Bearer k3y")]
 
 

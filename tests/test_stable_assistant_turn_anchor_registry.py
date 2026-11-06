@@ -1493,6 +1493,8 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     assert "_upsertAnchorReasoning(reasoningText" in src
     assert "`live-reasoning:${streamId}:final`" in src
     error_body = _event_listener_body(src, "error")
+    assert "await _retryStreamAfterError(source);" in error_body
+    error_body += _function_body(src, "_retryStreamAfterError")
     assert "_applyToAnchor('error'" not in error_body
     assert "_flushReasoningToAnchor();" in error_body
     assert "_scheduleAnchorRegistryCleanup(120000);" in error_body

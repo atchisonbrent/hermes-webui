@@ -40,9 +40,14 @@ UI_JS = (_REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 # signature; this one changes with the code it is testing.
 _PREDICATE = re.search(r"if\((cached&&[^{]*?)\)\{", UI_JS)
 assert _PREDICATE, "the _sessionHtmlCache hit predicate was not found in static/ui.js"
+_SIGNATURE_GATE = re.search(r"if\((cached\.signature===renderSignature)\)\{", UI_JS)
+assert _SIGNATURE_GATE, "the nested cache-signature gate was not found"
+assert _PREDICATE.end() < _SIGNATURE_GATE.start() < UI_JS.index("inner.innerHTML=cached.html;", _PREDICATE.end())
 _CACHE_HIT_FN = (
     "function _cacheHit(cached,msgCount,renderWindowKey,renderSignature){return ("
     + _PREDICATE.group(1)
+    + ") && ("
+    + _SIGNATURE_GATE.group(1)
     + ");}"
 )
 

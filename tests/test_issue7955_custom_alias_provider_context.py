@@ -312,6 +312,9 @@ def test_session_on_the_configured_provider_stays_bare(agent_aliases_ollama_to_c
             config.model_with_provider_context("deepseek-r1:14b", "ollama")
             == "deepseek-r1:14b"
         )
+        assert config.resolve_model_provider(
+            config.model_with_provider_context("deepseek-r1:14b", "ollama")
+        ) == ("deepseek-r1:14b", "custom", OLLAMA_BASE_URL)
     finally:
         _restore(old)
 

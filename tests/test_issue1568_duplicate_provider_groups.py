@@ -61,6 +61,8 @@ def _install_fake_hermes_cli(monkeypatch):
 def _swap_in_test_config(extra_cfg):
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
+    old_path = config._cfg_path
+    config._cfg_path = config._get_config_path()
     config.cfg.clear()
     config.cfg["model"] = {}
     config.cfg.update(extra_cfg)
@@ -73,6 +75,7 @@ def _swap_in_test_config(extra_cfg):
         config.cfg.clear()
         config.cfg.update(old_cfg)
         config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
 
     return _restore
 

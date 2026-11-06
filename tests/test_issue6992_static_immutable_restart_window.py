@@ -33,6 +33,7 @@ import os
 from urllib.parse import urlparse
 
 import pytest
+from api.asset_versions import content_version
 
 import api.config as api_config
 
@@ -113,12 +114,13 @@ def admission_open_afterwards():
 
 
 def test_fingerprinted_url_stays_immutable_when_tree_is_stable(isolated_static):
-    """Steady state: a non-empty ?v= is still an immutable fingerprint."""
+    """Steady state: a matching content fingerprint remains immutable."""
     from api import routes
 
     _make_static_file(isolated_static, "ui.js", b"x" * 2000)
+    version = content_version(b"x" * 2000)
 
-    h = _serve(routes, "/static/ui.js", query="v=abc1234")
+    h = _serve(routes, "/static/ui.js", query="v=" + version)
     assert h.status == 200
     assert h.header("Cache-Control") == "public, max-age=31536000, immutable"
     assert bytes(h.body) == b"x" * 2000
@@ -129,9 +131,10 @@ def test_repeat_fingerprinted_request_stays_immutable(isolated_static):
     from api import routes
 
     _make_static_file(isolated_static, "ui.js", b"y" * 4096)
+    version = content_version(b"y" * 4096)
 
     for _ in range(3):
-        h = _serve(routes, "/static/ui.js", query="v=stable-token")
+        h = _serve(routes, "/static/ui.js", query="v=" + version)
         assert h.header("Cache-Control") == "public, max-age=31536000, immutable"
 
 
@@ -152,8 +155,9 @@ def test_restart_pending_window_refuses_immutable_for_changed_bytes(
 
     run_drain = admission_open_afterwards
     target = _make_static_file(isolated_static, "ui.js", b"revision-A" * 300)
+    version = content_version(target.read_bytes())
 
-    before = _serve(routes, "/static/ui.js", query="v=abc1234")
+    before = _serve(routes, "/static/ui.js", query="v=" + version)
     assert before.header("Cache-Control") == "public, max-age=31536000, immutable"
     etag_before = before.header("ETag")
 
@@ -163,7 +167,7 @@ def test_restart_pending_window_refuses_immutable_for_changed_bytes(
 
     epoch = run_drain.mark_restart_pending()
     try:
-        during = _serve(routes, "/static/ui.js", query="v=abc1234")
+        during = _serve(routes, "/static/ui.js", query="v=" + version)
     finally:
         run_drain.abandon_restart_pending(epoch)
 
@@ -187,8 +191,9 @@ def test_update_hold_window_refuses_immutable_for_changed_bytes(
 
     run_drain = admission_open_afterwards
     target = _make_static_file(isolated_static, "ui.js", b"revision-A" * 300)
+    version = content_version(target.read_bytes())
 
-    before = _serve(routes, "/static/ui.js", query="v=abc1234")
+    before = _serve(routes, "/static/ui.js", query="v=" + version)
     assert before.header("Cache-Control") == "public, max-age=31536000, immutable"
 
     # A git pull rewrites files in place while the hold is open.
@@ -197,7 +202,7 @@ def test_update_hold_window_refuses_immutable_for_changed_bytes(
 
     token = run_drain.hold_run_admission("update:webui")
     try:
-        during = _serve(routes, "/static/ui.js", query="v=abc1234")
+        during = _serve(routes, "/static/ui.js", query="v=" + version)
     finally:
         run_drain.release_run_admission_hold(token)
 
@@ -219,8 +224,9 @@ def test_restart_pending_window_does_not_pin_a_stale_304(
 
     run_drain = admission_open_afterwards
     target = _make_static_file(isolated_static, "ui.js", b"revision-A" * 300)
+    version = content_version(target.read_bytes())
 
-    first = _serve(routes, "/static/ui.js", query="v=abc1234")
+    first = _serve(routes, "/static/ui.js", query="v=" + version)
     etag = first.header("ETag")
 
     target.write_bytes(b"revision-B" * 300)
@@ -232,7 +238,7 @@ def test_restart_pending_window_does_not_pin_a_stale_304(
         revalidated = _serve(
             routes,
             "/static/ui.js",
-            query="v=abc1234",
+            query="v=" + version,
             request_headers={"If-None-Match": etag},
         )
     finally:
@@ -252,9 +258,10 @@ def test_window_degradation_is_lifted_once_admission_reopens(
 
     run_drain = admission_open_afterwards
     _make_static_file(isolated_static, "ui.js", b"z" * 2048)
+    version = content_version(b"z" * 2048)
 
     epoch = run_drain.mark_restart_pending()
     run_drain.abandon_restart_pending(epoch)
 
-    after = _serve(routes, "/static/ui.js", query="v=abc1234")
+    after = _serve(routes, "/static/ui.js", query="v=" + version)
     assert after.header("Cache-Control") == "public, max-age=31536000, immutable"

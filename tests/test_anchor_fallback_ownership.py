@@ -412,6 +412,8 @@ def _render_messages_harness() -> str:
     """Node prelude that evaluates the real renderMessages() over a minimal fake DOM."""
 
     ui = _ui_js()
+    # The returned f-string interpolates Python variables in THIS helper's scope.
+    render_source = _function_source(ui, "renderMessages")
     transparent_source = _function_source(ui, "_transparentStreamOrderedParts")
     legacy_metadata_source = _function_source(ui, "_legacySettledFallbackHasToolMetadata")
     # #2051: renderMessages() inserts a message block through this helper, so it is
@@ -458,6 +460,13 @@ def _render_messages_harness() -> str:
             child.parentElement = this;
             this.children.push(child);
             return child;
+          }}
+          get nextElementSibling() {{
+            return this.parentElement?.children[this.parentElement.children.indexOf(this)+1] || null;
+          }}
+          before(child) {{
+            child.remove();
+            this.parentElement.insertBefore(child, this);
           }}
           insertBefore(child, ref) {{
             child.parentElement = this;
@@ -720,12 +729,18 @@ def _render_messages_harness() -> str:
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
         eval({json.dumps(insert_block_source)});
+        eval({json.dumps(_function_source(_ui_js(), "_renderUserInputReceipts"))});
+        eval({json.dumps(_function_source(_ui_js(), "_placeSettledCompactWorklogs"))});
+        eval({json.dumps(_function_source(_ui_js(), "_assistantDisplayCommentary"))});
+        eval({json.dumps(render_source)});
         {evals}
 """
 
 
 def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds():
     """Drive the real renderMessages() gate, not only source-order assertions."""
+
+    render_source = _function_source(_ui_js(), "renderMessages")
 
     script = textwrap.dedent(
         f"""{_render_messages_harness()}
@@ -938,11 +953,11 @@ def test_settled_legacy_activity_buckets_skip_anchor_owned_turns_before_renderin
     render = _function_body(_ui_js(), "renderMessages")
 
     tool_loop = render.index("for(const tc of (S.toolCalls||[])){")
-    tool_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;", tool_loop)
+    tool_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;", tool_loop)
     thinking_loop = render.index("for(const aIdx of assistantThinking.keys()){")
-    thinking_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;", thinking_loop)
+    thinking_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;", thinking_loop)
     worklog_loop = render.index("for(const [aIdx,seg] of assistantSegments){")
-    worklog_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;", worklog_loop)
+    worklog_skip = render.index("if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;", worklog_loop)
     anchor_render = render.index("_renderSettledAnchorSceneForMessage(msg, seg, rawIdx)")
 
     assert tool_loop < tool_skip < thinking_loop < thinking_skip < worklog_loop < worklog_skip

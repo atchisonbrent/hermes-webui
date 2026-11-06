@@ -224,6 +224,8 @@ class TestReconnectAccumulatorPreservation:
         m = re.search(r'function _reattachOrRestoreAfterDeferredStreamError\(source\)\{.*?\n  \}', src, re.DOTALL)
         assert m, "_reattachOrRestoreAfterDeferredStreamError(source) not found"
         fn = m.group(0)
-        assert 'S.session&&S.session.session_id' in fn
-        assert '!==activeSid' in fn
-        assert fn.index('!==activeSid') < fn.index('api(`/api/chat/stream/status?stream_id=')
+        assert '_isSessionCurrentPane(activeSid)' in fn
+        assert fn.index('_isSessionCurrentPane(activeSid)') < fn.index('api(`/api/chat/stream/status?stream_id=')
+        pane = src.split('function _isSessionCurrentPane(sid)', 1)[1].split('\n}', 1)[0]
+        assert 'S.session.session_id!==sid' in pane
+        assert '_loadingSessionId!==sid' in pane

@@ -14,6 +14,8 @@ for async / heavy post-processing (diff, csv, pdf, mermaid, katex) under anchor 
 from pathlib import Path
 import pytest
 
+from tests.test_issue3709_thinking_double_render import _function_body
+
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 
@@ -81,9 +83,12 @@ def test_session_html_cache_preserves_pre_highlight_markup(ui_js_content):
 
 def test_cached_session_restore_runs_highlight_synchronously(ui_js_content):
     """The fast-path cached session restore must also synchronously ensure highlighting before scrolling."""
-    cache_branch_idx = ui_js_content.find("_sessionHtmlCache.get(sid);")
+    # Check the complete fast-restore branch. A fixed byte window can clip the
+    # scroll call even when it follows synchronous highlighting correctly.
+    render_body = _function_body("renderMessages")
+    cache_branch_idx = render_body.find("_sessionHtmlCache.get(sid);")
     assert cache_branch_idx != -1, "Session HTML cache branch not found"
-    cache_slice = ui_js_content[cache_branch_idx : cache_branch_idx + 1200]
+    cache_slice = render_body[cache_branch_idx:]
 
     highlight_call = "if(typeof highlightCode==='function') highlightCode(inner);"
     tree_init_call = "if(typeof initTreeViews==='function') initTreeViews(inner);"

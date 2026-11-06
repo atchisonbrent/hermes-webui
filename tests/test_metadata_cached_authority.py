@@ -33,12 +33,18 @@ def _source():
         "_adoptRegenerationRevision",
         "_currentLoadedRenderableMessageCount",
         "_captureSameSessionForceReloadHint",
+        "_loadedMessageBoundarySignature",
+        "_captureLoadedMessageWindow",
+        "_preserveLoadedMessageWindow",
+        "_restoreActiveTurnWindowBoundary",
+        "_reconcileRunningMessageWindow",
         "_clearSameSessionForceReloadHint",
         "_messageReloadLimitForSession",
     )
     functions = [extract_function(sessions, name) for name in names]
     for name in ("loadSession", "_ensureMessagesLoaded", "_ensureAllMessagesLoaded"):
         functions.append(extract_function(sessions, name, "async function"))
+    functions.append(extract_function(ui, "_adoptUserInputReceipts"))
     functions.append(extract_function(ui, "regenerateResponse", "async function"))
     functions.append(extract_function(messages, "startRegeneration", "async function"))
     return "\n".join(functions)

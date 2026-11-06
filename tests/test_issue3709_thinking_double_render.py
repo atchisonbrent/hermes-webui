@@ -23,7 +23,9 @@ UI_JS = (Path(__file__).resolve().parent.parent / "static" / "ui.js").read_text(
 def _render_messages_body() -> str:
     start = UI_JS.find("function renderMessages(")
     assert start != -1, "renderMessages() not found"
-    return UI_JS[start:start + 80000]
+    # Exercise the complete function, not an arbitrary prefix of the now
+    # larger activity renderer. Use the existing brace-aware extractor.
+    return _function_body("renderMessages")
 
 
 def _function_body(name: str) -> str:
@@ -96,7 +98,7 @@ def test_settled_thinking_renders_through_worklog_item_path():
 
 def test_settled_worklog_thinking_uses_content_key_for_exact_duplicate_suppression():
     body_min = re.sub(r"\s+", "", _render_messages_body())
-    assert "thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:''" in body_min, (
+    assert "thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompareCached(thinkingText,thinkingEchoCache)}`:''" in body_min, (
         "Settled Worklog should suppress duplicate Thinking by normalized content, "
         "not by assistant message index."
     )
@@ -109,7 +111,7 @@ def test_exact_echo_suppression_compares_turn_visible_texts():
     body = _render_messages_body()
     helper = _function_body("_worklogReasoningTextFromMessage")
     assert "assistantTurnVisibleContentByRawIdx" in body
-    assert "_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents)" in body
+    assert "_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents, thinkingEchoCache)" in body
     assert "_stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts)" in helper, (
         "A thinking-only sibling that exactly echoes the visible process/final text "
         "should be suppressed after settlement."

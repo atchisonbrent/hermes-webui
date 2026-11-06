@@ -355,7 +355,12 @@ def _hidden_completion_script(*, hidden: bool) -> str:
     """Build a Node harness that drives the REAL _ensureMessagesLoaded() through a
     delayed messages fetch, marks a completion mid-fetch, and reports whether the
     completion-unread marker survives."""
-    ensure = _extract_async("_ensureMessagesLoaded")
+    ensure = "\n".join([
+        _extract("_loadedMessageBoundarySignature"),
+        _extract("_preserveLoadedMessageWindow"),
+        _extract("_restoreActiveTurnWindowBoundary"),
+        _extract_async("_ensureMessagesLoaded"),
+    ])
     set_viewed = _extract("_setSessionViewedCount")
     clear_unread = _extract("_clearSessionCompletionUnread")
     get_unread = _extract("_getSessionCompletionUnread")
@@ -388,6 +393,7 @@ let _messageRenderWindowSize = 0;
 const _MSG_LIMIT_MAX = 500;
 let _msgLimitMax = _MSG_LIMIT_MAX;
 let _pendingCarryForwardSnapshot = null;
+let _sameSessionForceReloadHint = null;
 let _loadingSessionId = 'open';
 let _loadSessionGeneration = 0;
 const window = {{}};
@@ -404,6 +410,7 @@ let S = {{ session: {{ session_id: 'open', message_count: 0 }}, messages: [], la
 function _clearSameSessionForceReloadHint() {{}}
 function _messageReloadLimitForSession() {{ return 0; }}
 function _syncToolCallsForLoadedMessages() {{}}
+function _adoptUserInputReceipts() {{}}
 function clearLiveToolCards() {{}}
 
 // Delayed messages fetch: resolves only when we release it, simulating a slow

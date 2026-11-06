@@ -23,6 +23,43 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+MEDIA references permit spaces or tabs after the colon, but not a newline.
+Streaming, settled rendering, session artifact authorization, immutable media
+snapshots and share export use the same horizontal-whitespace rule. Existing
+path authorization, MIME checks and share-root restrictions remain unchanged.
+
+
+A result ending in an assistant `stop` row containing reasoning but no answer is
+not evidence of a rate limit. The in-process streaming adapter reports
+`reasoning_only` when no current-turn final answer survived settlement and persists
+an explicit no-final-answer error. Existing streamed-reasoning retention is unchanged.
+It does not replay tools or promote reasoning into
+a successful answer. Truly empty results retain `no_response` with unknown cause;
+explicit authentication, cancellation and provider errors retain precedence.
+
+
+Cron completion polling is a read-only observation path. On agents supporting
+`use_cron_store`, it binds the active profile's store without changing global
+environment variables or waiting for job execution. Older agents use the legacy
+profile context only if immediately available; contention returns HTTP 503.
+The browser permits only one pending completion poll, preserves its cursor on
+transport failure, and suppresses background timeout toasts. Actual job completion
+alerts retain their per-job preference and profile-generation fence. Other cron
+controls still use the existing execution/profile serialization.
+
+Explicit bare-model provider selections must retain that provider even when it is
+also the profile default and its static model catalog lags. Preserve the selected
+provider's configured endpoint; another provider's overlapping model list is not
+permission to reroute the request. Existing slash-ID portal/proxy normalization
+and bare `custom`/legacy `local` endpoint normalization remain separate.
+
+Compression `threshold_tokens` is an observation of the runtime compressor, not
+a ratio inferred from display metadata. Live metering, settled SSE, persistence,
+and same-model hydration preserve that observed trigger when a display window is
+corrected. A model/provider change clears the old observation until a new run
+reports its trigger. This supersedes the earlier display-only threshold rescaling
+rule; the change does not modify the agent's compression policy or model capacity.
+
 - [`docs/architecture/model-picker-routing.md`](architecture/model-picker-routing.md):
   current contract for provider-scoped model identity, exact OpenRouter route
   matching, overflow promotion, routed fallback, and selected-row rendering.

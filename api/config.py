@@ -28,7 +28,7 @@ import urllib.request
 import uuid
 import weakref
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
@@ -471,7 +471,7 @@ def _thread_local_env_value(name: str, default: str = "") -> str:
 
 # ── Config file (reloadable -- supports profile switching) ──────────────────
 
-def _expand_env_vars(obj):
+def _expand_env_vars(obj, _active: dict[int, Any] | None = None, *, _allow_cycles=False) -> Any:
     """Recursively expand ${VAR} references in config values.
 
     Uses the thread-local-first profile env lookup (_thread_local_env_value) so a
@@ -488,11 +488,28 @@ def _expand_env_vars(obj):
             lambda m: _thread_local_env_value(m.group(1), m.group(0)),
             obj,
         )
-    if isinstance(obj, dict):
-        return {k: _expand_env_vars(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_expand_env_vars(item) for item in obj]
-    return obj
+    if not isinstance(obj, (dict, list)):
+        return obj
+    # A back-reference points at the copy currently being constructed.
+    active = {} if _active is None else _active
+    identity = id(obj)
+    if identity in active:
+        if not _allow_cycles:
+            raise RecursionError("recursive configuration alias")
+        return active[identity]
+    expanded: Any = {} if isinstance(obj, dict) else []
+    active[identity] = expanded
+    try:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                expanded[key] = _expand_env_vars(value, active, _allow_cycles=_allow_cycles)
+        else:
+            expanded.extend(_expand_env_vars(item, active, _allow_cycles=_allow_cycles) for item in obj)
+        return expanded
+    finally:
+        # Only recursion ancestors suppress reuse. A shared, non-cyclic alias
+        # is still expanded independently for each occurrence, as before.
+        active.pop(identity, None)
 
 
 _cfg_cache = {}
@@ -1045,6 +1062,19 @@ def _config_for_yaml_save(config_data: dict) -> dict:
     return data
 
 
+def _protect_credential_reference(current, raw, field):
+    """Keep source-owned credential references symbolic at the save boundary."""
+    ref = re.compile(r"\$\{([^}]+)\}")
+    secret_name = re.compile(r"password|passwd|token|secret|api[_-]?key|credential|authorization|cookie", re.I)
+    refs = ref.findall(raw)
+    protected = refs if secret_name.search(field) else [name for name in refs if secret_name.search(name)]
+    if protected:
+        # A complete new reference contains no expanded credential bytes.
+        if ref.fullmatch(current):
+            return current
+        if not set(protected).issubset(ref.findall(current)):
+            return raw
+    return None
 # ── Config WRITE rule (#8032 / #5619) ─────────────────────────────────────────
 # A config write transaction must read config.yaml with
 # _load_yaml_config_file_raw(), mutate that RAW document and save it. Env
@@ -1093,16 +1123,130 @@ def _normalize_base_url_for_compare(value) -> str:
     return str(value or "").strip().rstrip("/")
 
 
-def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+def _preserve_reference_graph(current, raw, expanded, *, _active=None, field=""):
+    """Cycle-safe traversal for recursive YAML, preserving container identity.
+
+    The input is a private copy produced by _config_for_yaml_save(). Delegates
+    scalar handling and unique-name matching to the companion Agent helpers.
+    """
+    from hermes_cli.config import _items_by_unique_name, _preserve_env_ref_templates
+
+    if isinstance(current, dict) and isinstance(raw, dict):
+        active = set() if _active is None else _active
+        pair = (id(current), id(raw))
+        if pair in active:
+            return current
+        active.add(pair)
+        try:
+            for key, value in current.items():
+                current[key] = _preserve_reference_graph(
+                    value,
+                    raw.get(key),
+                    expanded.get(key) if isinstance(expanded, dict) else None,
+                    _active=active,
+                    field=str(key),
+                )
+            return current
+        finally:
+            active.discard(pair)
+
+    if isinstance(current, list) and isinstance(raw, list):
+        active = set() if _active is None else _active
+        pair = (id(current), id(raw))
+        if pair in active:
+            return current
+        active.add(pair)
+        try:
+            current_by_name = _items_by_unique_name(current)
+            raw_by_name = _items_by_unique_name(raw)
+            expanded_by_name = _items_by_unique_name(expanded)
+            if any(isinstance(item, dict) and "name" in item for item in (*current, *raw)) and (
+                current_by_name is None or raw_by_name is None
+            ):
+                raise ValueError("Cannot preserve references in ambiguous named configuration list")
+            for index, value in enumerate(current):
+                if current_by_name is not None and raw_by_name is not None:
+                    name = value.get("name")
+                    previous = raw_by_name.get(name)
+                    prior_expanded = expanded_by_name.get(name) if expanded_by_name is not None else None
+                else:
+                    previous = raw[index] if index < len(raw) else None
+                    prior_expanded = expanded[index] if isinstance(expanded, list) and index < len(expanded) else None
+                current[index] = _preserve_reference_graph(
+                    value, previous, prior_expanded, _active=active, field=field
+                )
+            return current
+        finally:
+            active.discard(pair)
+
+    return _preserve_env_ref_templates(
+        current, raw, expanded,
+        string_policy=_protect_credential_reference, field=field,
+    )
+
+
+def _save_yaml_config_file(
+    config_path: Path,
+    config_data: dict,
+    *,
+    literal_credential_paths: tuple[tuple[str, ...], ...] = (),
+) -> None:
+    """Persist config while retaining raw references outside explicit raw edits.
+
+    ``literal_credential_paths`` is only for a raw-config writer honoring an
+    intentional credential replacement at a known field. It must never be
+    selected by bulk writers persisting a runtime-expanded config dictionary.
+    """
     try:
         from api import yaml_compat as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    # Parse strictly: the permissive read cache cannot establish write safety.
+    try:
+        raw = _yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError("configuration root is not a mapping")
+    except Exception:
+        raise ValueError("Cannot preserve environment references in unreadable existing configuration") from None
+    reference_source = raw
+    if literal_credential_paths:
+        # Remove only original values at explicitly replaced fields. The rest
+        # of the original config, including every unrelated credential
+        # reference, continues through the strict preservation policy below.
+        reference_source = copy.deepcopy(raw)
+        for path in literal_credential_paths:
+            owner = reference_source
+            for component in path[:-1]:
+                owner = owner.get(component) if isinstance(owner, dict) else None
+            if isinstance(owner, dict) and path:
+                owner.pop(path[-1], None)
+    try:
+        from hermes_cli.config import _preserve_env_ref_templates
+        prepared = _config_for_yaml_save(config_data)
+        try:
+            expanded = _expand_env_vars(raw)
+        except RecursionError:
+            # Readers retain upstream's unexpanded-cycle fallback. The writer
+            # needs a cycle-preserving comparison graph, not a read-policy change.
+            expanded = _expand_env_vars(raw, _allow_cycles=True)
+        try:
+            data = _preserve_env_ref_templates(
+                prepared, reference_source, expanded,
+                string_policy=_protect_credential_reference,
+            )
+        except RecursionError:
+            data = _preserve_reference_graph(prepared, reference_source, expanded)
+    except (ImportError, TypeError):
+        # This security boundary requires the paired reference-policy helper.
+        # Do not silently persist expansions with an older companion agent.
+        raise ValueError("Config save requires a compatible reference-preserving agent") from None
     _paths._atomic_write_text(
         config_path,
-        _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
+        _yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
     # Invalidate the memoized parse for this path so the next read re-parses the
@@ -1808,7 +1952,7 @@ def _custom_provider_entries(
         entry = copy.deepcopy(record)
         entry["name"] = identity if identity in native else key
         fallback_label = key if explicit_native else key.replace("-", " ").title()
-        entry["display_name"] = str(record.get("name") or fallback_label).strip()
+        entry["display_name"] = str(record.get("name") or "").strip() or fallback_label
         # Native records are hand-edited config; only a string names a default
         # model in the legacy-shaped view. A non-string ``model`` / ``default_model``
         # (``model: 42``) must not reach consumers that call ``.strip()`` on it:
@@ -2903,16 +3047,19 @@ def _apply_provider_prefix(
     """Return *raw_models* with @provider: prefixes applied when needed.
 
     Prefixing is skipped when (a) the provider is already the active one, or
-    (b) a model id already starts with '@' or contains '/' (already routable).
+    (b) a model id already starts with '@'. Slash IDs keep legacy behavior
+    except on explicitly configured live endpoints: vendor/model is not the
+    serving provider's routing identity.
     """
     _active = (active_provider or "").lower()
     if not _active or provider_id == _active:
         return list(raw_models)
+    configured_catalog = _configured_live_provider_record(provider_id, cfg) is not None
     result = []
     for m in raw_models:
         mid = m["id"]
         entry = dict(m)
-        if mid.startswith("@") or "/" in mid:
+        if mid.startswith("@") or ("/" in mid and not configured_catalog):
             result.append(entry)
         else:
             entry["id"] = f"@{provider_id}:{mid}"
@@ -3223,6 +3370,23 @@ def _get_provider_base_url(provider_id):
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
+    # Bare legacy IDs (custom-llm) need the keyed native provider lookup too:
+    # that record supports api/url aliases, and must not be replaced by a
+    # same-slug legacy custom_providers[] row. Canonical slug resolution still
+    # applies the legacy-list precedence above its callers' URL lookup.
+    if str(provider_id or "").strip().lower().startswith("custom:") or _is_native_custom_provider_key(provider_id):
+        canonical = _custom_provider_slug_from_name(provider_id)
+        providers_cfg = cfg.get("providers", {}) if isinstance(cfg, dict) else {}
+        if canonical and isinstance(providers_cfg, dict):
+            record, _disabled = _native_custom_provider_record(
+                providers_cfg, canonical, _custom_provider_slug_key(canonical),
+            )
+            if isinstance(record, dict):
+                native_url = str(
+                    record.get("base_url") or record.get("api") or record.get("url") or ""
+                ).strip().rstrip("/")
+                if native_url:
+                    return native_url
     prov_cfg = _get_provider_cfg(provider_id)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
@@ -3714,8 +3878,17 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             )
             if entry is not None:
                 base_url = str(entry.get('base_url') or '').strip() or None
+            elif provider_hint == config_provider and config_base_url:
+                base_url = config_base_url
             else:
                 base_url = _get_provider_base_url(provider_hint)
+        elif (provider_hint != 'custom' and _resolve_provider_alias(provider_hint) == 'custom'
+              and _get_provider_cfg(provider_hint).get('base_url')):
+            # An explicit named pick owns its configured endpoint, even when its
+            # provider name also names the profile's generic custom lane.
+            base_url = _get_provider_base_url(provider_hint)
+        elif provider_hint == config_provider and config_base_url:
+            base_url = config_base_url
         else:
             base_url = _get_provider_base_url(provider_hint)
         return _finalize(bare_model, provider_hint, base_url)
@@ -5725,8 +5898,8 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     Session persistence keeps the user's selected provider in ``model_provider``
     instead of forcing every selected model into ``@provider:model`` form. At
     runtime, however, ``resolve_model_provider()`` still understands that
-    internal disambiguation form, so use it only when the provider context is
-    needed to route away from the current default provider.
+    internal disambiguation form. Preserve bare-model provider selections even
+    when they match the default; static catalogs are not selection authority.
     """
     model = str(model_id or "").strip()
     provider = str(model_provider or "").strip().lower()
@@ -5758,10 +5931,16 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if provider == "openai-codex":
         return f"@{provider}:{model}"
 
-    # If the selected provider is already the configured provider, leaving the
-    # model bare preserves provider-specific base_url/proxy settings.
+    # Keep explicit selection even when it matches the profile default. A bare
+    # non-default model can otherwise be claimed by another provider's catalog.
     if provider == config_provider:
-        return model
+        if provider not in {"custom", "local"} and _resolve_provider_alias(provider) == "custom":
+            return _ConfiguredCustomLaneModel(model)
+        # Slash IDs and local pseudo-providers retain endpoint normalization;
+        # @custom:model:tag is ambiguous with a named custom-provider identity.
+        if "/" in model or provider in {"custom", "local"} or provider.startswith("custom:"):
+            return model
+        return f"@{provider}:{model}"
 
     # The picker reports a configured provider that aliases to the generic
     # ``custom`` lane (``local``, or ``ollama`` through the agent's alias table)
@@ -6350,6 +6529,12 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     return []
 
 
+def _catalog_reasoning_provider_cfg(provider_id: str) -> dict:
+    """Use the selected live route's metadata without changing legacy config lookup."""
+    record = _configured_live_provider_record(provider_id, cfg)
+    return _get_provider_cfg(provider_id) if record is None else record
+
+
 def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] | None:
     """Return reasoning efforts from Hermes Agent model metadata when known.
 
@@ -6362,19 +6547,24 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     if not model or not provider:
         return None
 
+    catalog_provider = str(_catalog_reasoning_provider_cfg(provider).get("catalog_provider") or "").strip()
     try:
         from agent.models_dev import get_model_capabilities
     except Exception:
-        return None
+        return [] if catalog_provider else None
 
     try:
-        capabilities = get_model_capabilities(provider=provider, model=model)
+        capabilities = get_model_capabilities(provider=catalog_provider or provider, model=model)
     except Exception:
-        return None
+        return [] if catalog_provider else None
     if capabilities is None:
-        return None
+        return [] if catalog_provider else None
 
     supports_reasoning = getattr(capabilities, "supports_reasoning", None)
+    efforts = getattr(capabilities, "reasoning_efforts", None)
+    if catalog_provider and hasattr(capabilities, "reasoning_efforts"):
+        # A boolean or absent schema does not advertise a graded wire control.
+        return _filter_reasoning_efforts_for_provider(list(efforts or ()), model, provider)
     if supports_reasoning is True:
         return _filter_reasoning_efforts_for_provider(
             list(VALID_REASONING_EFFORTS), model, provider
@@ -6665,7 +6855,10 @@ def _resolve_model_reasoning_efforts_impl(
     # empty model metadata falls through to the provider list, then heuristics.
     _re_lists = []
     try:
-        if provider and provider.startswith("custom:"):
+        _live_record = _configured_live_provider_record(provider, cfg)
+        if _live_record is not None:
+            _re_lists = _configured_reasoning_effort_lists(_live_record, hinted_model)
+        elif provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
@@ -6820,6 +7013,8 @@ def coerce_reasoning_effort_for_model(
     # verbatim, which Z.AI would silently ignore. This keeps the value actually
     # sent in agreement with the UI (which offers no options for these models).
     if not supported:
+        if _catalog_reasoning_provider_cfg(str(provider_id or "")).get("catalog_provider"):
+            return ""
         if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
             return ""
         if raw == "max" and not _provider_known_reasoning_capable(provider_id):
@@ -6844,8 +7039,19 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def _configured_reasoning_effort(config_data, model_id=None):
+    """Return the selected model's override, then the profile fallback."""
+    agent_cfg = config_data.get('agent') if isinstance(config_data, dict) else None
+    if not isinstance(agent_cfg, dict):
+        return None
+    overrides = agent_cfg.get('reasoning_overrides')
+    if model_id and isinstance(overrides, dict) and model_id in overrides:
+        return overrides[model_id]
+    return agent_cfg.get('reasoning_effort')
+
+
 def _config_reasoning_effort(config_data) -> str:
-    """Return a config dict's ``agent.reasoning_effort`` ("" when unset)."""
+    """Return only the profile-wide fallback, without a model override."""
     agent_cfg = config_data.get("agent") if isinstance(config_data, dict) else None
     if not isinstance(agent_cfg, dict):
         return ""
@@ -6860,41 +7066,33 @@ def resolve_session_reasoning_effort(
     provider_id: str | None = None,
     base_url: str | None = None,
 ) -> str:
-    """Resolve the effort used by one WebUI session for its next turn.
+    """Resolve a session choice, then model-specific and profile defaults.
 
-    ``Session.reasoning_effort`` is authoritative when present, including the
-    empty string (provider default). Legacy sessions store ``None`` and inherit
-    the active profile's CLI-compatible ``agent.reasoning_effort`` value.
+    An explicitly stored empty effort means provider default and therefore does
+    not inherit another model's override. Legacy sessions without a session
+    choice retain the fork's model-specific override before the profile fallback.
     """
     effort_raw = session_effort
     if effort_raw is None:
-        effort_raw = _config_reasoning_effort(config_data)
+        effort_raw = _configured_reasoning_effort(config_data, model_id)
     return coerce_reasoning_effort_for_model(
-        effort_raw,
-        model_id,
-        provider_id=provider_id,
-        base_url=base_url,
+        effort_raw, model_id, provider_id=provider_id, base_url=base_url,
     )
 
 
-def effective_session_reasoning_effort(session_effort, profile_home) -> str:
-    """Return the stored effort a session's next turn starts from.
-
-    ``session_effort`` wins when present (``""`` = provider default). Legacy
-    sessions (``None``) inherit ``agent.reasoning_effort`` from their own
-    profile's isolated config: the single source shared by the composer chip,
-    new-session defaults, and the local and Gateway workers.
-    """
+def effective_session_reasoning_effort(
+    session_effort, profile_home, model_id: str | None = None
+) -> str:
+    """Read a legacy session's model/default from its own isolated profile."""
     if session_effort is not None:
         return str(session_effort)
-    return _config_reasoning_effort(
-        get_config_for_profile_home(profile_home, isolate_config_override=True)
+    config_data = get_config_for_profile_home(
+        profile_home, isolate_config_override=True,
     )
+    return _configured_reasoning_effort(config_data, model_id) or ""
 
 
 _REASONING_EFFORT_UNSET = object()
-
-
 def get_reasoning_status(
     *,
     model_id: str | None = None,
@@ -6910,21 +7108,20 @@ def get_reasoning_status(
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
-      - reasoning_effort: str — from ``agent.reasoning_effort`` ('' = default)
+      - reasoning_effort: str — selected-model override, then global fallback
     """
-    config_data = _load_yaml_config_file(_get_config_path())
+    # Profile identity selects the config file. In particular, a deleted active
+    # profile must not silently inherit HERMES_CONFIG_PATH from another/default
+    # profile. An explicit effort_override below still supplies the session's
+    # already-resolved value without making that other profile authoritative.
+    default_path = _active_isolated_config_path()
+    config_data = _load_yaml_config_file(default_path) if default_path is not None else {}
     display_cfg = config_data.get("display") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
     if effort_override is not _REASONING_EFFORT_UNSET:
         effort_raw = effort_override
     else:
-        # The profile default comes from the same isolated file the session
-        # readers and write_reasoning_effort() use, not the ambient override.
-        default_path = _active_isolated_config_path()
-        effort_raw = (
-            _config_reasoning_effort(_load_yaml_config_file(default_path))
-            if default_path is not None else ""
-        )
+        effort_raw = _configured_reasoning_effort(config_data, model_id)
 
     resolve_model = model_id
     resolve_provider = provider_id
@@ -7093,13 +7290,19 @@ def set_reasoning_effort(
     provider_id: str | None = None,
     base_url: str | None = None,
 ) -> dict:
-    """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
+    """Persist reasoning effort to the active profile's config.yaml.
 
-    Mirrors CLI ``/reasoning <level>``: same key, same valid values
+    Model-aware requests write ``agent.reasoning_overrides[model_id]`` so a
+    composer choice cannot leak onto unrelated models. Requests without model
+    context retain the legacy global ``agent.reasoning_effort`` behavior.
+
+    Mirrors CLI ``/reasoning <level>``: same valid values
     (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
 
     An empty string is accepted as "clear the override" — it removes the
-    ``agent.reasoning_effort`` key so the provider default takes effect. This is
+    selected model override (or the global key for model-less requests).
+    Model-aware reads then fall back to the global ``agent.reasoning_effort``,
+    when configured, and otherwise to the provider default. This is
     the re-enable path for thinking-toggle-only models (GLM-4.5–5.1 on native
     zai): the dropdown's "Default"/"On" option POSTs ``effort:''`` to switch
     thinking back on after the user selected "None". Without this, the toggle
@@ -7107,7 +7310,7 @@ def set_reasoning_effort(
 
     Raises ``ValueError`` on any other unrecognised level so callers can 400.
     """
-    write_reasoning_effort(effort)
+    write_reasoning_effort(effort, model_id=model_id)
     return get_reasoning_status(
         model_id=model_id,
         provider_id=provider_id,
@@ -7121,7 +7324,11 @@ def _active_isolated_config_path() -> "Path | None":
     return isolated_profile_config_path(get_active_hermes_home())
 
 
-def write_reasoning_effort(effort: str, profile_home: "Path | str | None" = None) -> str:
+def write_reasoning_effort(
+    effort: str,
+    profile_home: "Path | str | None" = None,
+    model_id: str | None = None,
+) -> str:
     """Write ``agent.reasoning_effort`` to a profile's config.yaml.
 
     The local file write half of :func:`set_reasoning_effort`, without the
@@ -7154,14 +7361,25 @@ def write_reasoning_effort(effort: str, profile_home: "Path | str | None" = None
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        if raw:
-            agent_cfg["reasoning_effort"] = raw
-        else:
-            # Clear the override so the provider default takes effect (the
-            # "Default"/"On" re-enable path for thinking-toggle-only models).
-            # Drop the key entirely rather than writing an empty string so the
-            # CLI's "is reasoning_effort configured?" check stays simple.
-            agent_cfg.pop("reasoning_effort", None)
+        # An explicit model owns only its override. Model-less CLI-compatible
+        # writes retain the profile-default behavior without changing other models.
+        if not model_id:
+            if raw:
+                agent_cfg["reasoning_effort"] = raw
+            else:
+                agent_cfg.pop("reasoning_effort", None)
+        if model_id:
+            overrides = agent_cfg.get("reasoning_overrides")
+            if not isinstance(overrides, dict):
+                overrides = {}
+            if raw:
+                overrides[model_id] = raw
+            else:
+                overrides.pop(model_id, None)
+            if overrides:
+                agent_cfg["reasoning_overrides"] = overrides
+            else:
+                agent_cfg.pop("reasoning_overrides", None)
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()
@@ -7432,7 +7650,9 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg.pop("api_key", None)
     api_key = str(advanced.get("api_key") or "").strip()
     if api_key:
-        model_cfg["api_key"] = api_key
+        # An unchanged expansion stays symbolic; a genuinely new literal is
+        # authorized below by set_hermes_default_model's raw transaction.
+        model_cfg["api_key"] = _preserve_env_ref(model_cfg.get("api_key"), api_key)
 
 
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
@@ -7518,8 +7738,15 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if not _main_model_supports_service_tier(persisted_model, persisted_provider):
             model_cfg.pop("service_tier", None)
 
+        literal_credential_paths = (
+            (("model", "api_key"),)
+            if isinstance(advanced, dict) and str(advanced.get("api_key") or "").strip()
+            else ()
+        )
         config_data["model"] = model_cfg
-        _save_yaml_config_file(config_path, config_data)
+        _save_yaml_config_file(
+            config_path, config_data, literal_credential_paths=literal_credential_paths
+        )
     # Reload outside the lock — reload_config() acquires _cfg_lock itself.
     reload_config()
     # Invalidate the TTL cache so the next /api/models call returns fresh data
@@ -8514,6 +8741,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                         for key in ("api_key", "key_env", "base_url")
                     )
                     provider_models = provider_cfg.get("models")
+                    if _configured_live_provider_record(canonical, cfg) is not None:
+                        provider_models = None
+                        has_local_signal = True
                     for model_id in _configured_model_ids(provider_models):
                         _append_model_id(canonical, model_id)
                         has_local_signal = True
@@ -8552,9 +8782,17 @@ def _static_models_catalog_without_live_probes() -> dict:
                     detected_providers.add(provider)
                     _append_model_id(provider, entry.get("model"))
 
+        legacy_custom_names = _legacy_custom_provider_names(cfg)
         for entry in _custom_provider_entries(cfg, for_catalog=True):
             provider_name = str(entry.get("name") or "").strip()
             provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
+            configured_live_authority = (
+                provider_slug != "custom"
+                and provider_name.lower() not in legacy_custom_names
+                and _configured_live_provider_record(provider_slug, cfg) is not None
+            )
+            # Keep an explicit default selection, but never resurrect the
+            # discovered catalog's retired static models while offline.
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
@@ -8566,7 +8804,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             model_id = str(entry.get("model") or "").strip()
             if model_id:
                 configured_ids.append(model_id)
-            for configured_id in _configured_model_ids(entry.get("models")):
+            for configured_id in _configured_model_ids(entry.get("models") if not configured_live_authority else []):
                 if configured_id not in configured_ids:
                     configured_ids.append(configured_id)
 
@@ -8640,14 +8878,17 @@ def _static_models_catalog_without_live_probes() -> dict:
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
             provider_cfg = _get_provider_cfg(raw_key)
+            provider_name = str(provider_cfg.get("name") or "").strip() or provider_name
+            configured_live_authority = _configured_live_provider_record(pid, cfg) is not None
             raw_models = []
             if (
                 isinstance(provider_cfg, dict)
                 and "models" in provider_cfg
                 and not _provider_models_are_discovered_catalog(provider_cfg)
+                and not configured_live_authority
             ):
                 raw_models = _configured_model_options(provider_cfg.get("models"))
-            if not raw_models:
+            if not raw_models and not configured_live_authority:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
             # Plugin-only providers (e.g. 9router) are not in _PROVIDER_MODELS
             # and rarely ship a `models:` allowlist in providers.<slug>, so
@@ -10512,8 +10753,28 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     )
 
 
-def _read_live_provider_model_ids(provider_id: str) -> list[str]:
-    """Return live model IDs from Hermes CLI for a provider, or [] on failure.
+def _configured_live_provider_record(provider_id: str, config_data: dict) -> dict | None:
+    """Resolve an explicitly enabled named catalog through existing authority rules."""
+    slug = _canonicalise_provider_id(provider_id).removeprefix("custom:")
+    if slug in _PROVIDER_MODELS or slug in _PROVIDER_DISPLAY or _is_plugin_model_provider(slug):
+        return None
+    try:
+        record, _, _, _ = _select_custom_provider_record(f"custom:{slug}", slug, config_data)
+    except AmbiguousCustomProviderError:
+        # An ambiguous route is authoritative but unavailable: suppress its
+        # fallbacks without taking unrelated providers out of the picker.
+        return {}
+    if (record and record.get("base_url") and "discover_models" in record
+            and _provider_discover_allowed(record)):
+        return record
+    return None
+
+
+def _read_live_provider_model_ids(
+    provider_id: str, *, timeout_seconds: float | None = None,
+    probe_status: dict | None = None,
+) -> list[str]:
+    """Return live model IDs, optionally bounded by the caller's probe schedule.
 
     WebUI's static ``_PROVIDER_MODELS`` table is only a fallback.  The agent CLI
     owns the provider registry and catalog-discovery logic, so ordinary picker
@@ -10525,6 +10786,41 @@ def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     pid = str(provider_id or "").strip()
     if not pid:
         return []
+    provider_cfg = _configured_live_provider_record(pid, get_config())
+    if provider_cfg is not None:
+        # A configured endpoint is authoritative, including on failure. Reuse
+        # the route bundle and Agent's credential/header-scoped catalog cache;
+        # never try a native provider with the same name after this probe fails.
+        try:
+            from hermes_cli.models import cached_fetch_api_models
+            bundle = resolve_custom_provider_bundle(f"custom:{pid.removeprefix('custom:')}")
+            if not bundle or not bundle.get("endpoint_owned"):
+                return []
+            if not bundle.get("api_key") and not bundle.get("keyless"):
+                return []
+            owned = bundle.get("owned") or {}
+            headers = _expand_env_vars((bundle.get("record") or {}).get("extra_headers"))
+            kwargs = {
+                "headers": headers if isinstance(headers, dict) else None,
+                "api_mode": owned.get("api_mode"),
+            }
+            if timeout_seconds is not None:
+                kwargs["timeout"] = timeout_seconds
+            ids = cached_fetch_api_models(
+                bundle.get("api_key"), bundle.get("base_url"), force_refresh=True, **kwargs,
+            )
+            if ids is None:
+                ids = cached_fetch_api_models(
+                    bundle.get("api_key"), bundle.get("base_url"), cache_only=True, **kwargs,
+                )
+            if ids is None and probe_status is not None:
+                probe_status["unavailable"] = True
+            return list(dict.fromkeys(mid.strip() for mid in (ids or []) if isinstance(mid, str) and mid.strip()))
+        except Exception:
+            if probe_status is not None:
+                probe_status["unavailable"] = True
+            logger.debug("Configured catalog unavailable for %s", pid)
+            return []
     try:
         from hermes_cli.models import provider_model_ids as _provider_model_ids
     except Exception:
@@ -11616,6 +11912,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _custom_providers_cfg = _custom_provider_entries(cfg, for_catalog=True)
         _named_custom_groups: dict = {}
         _named_custom_errors: dict[str, dict] = {}
+        _legacy_custom_names = _legacy_custom_provider_names(cfg)
         if isinstance(_custom_providers_cfg, list):
             _seen_custom_ids = set()
             for _cp in _custom_providers_cfg:
@@ -11623,6 +11920,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     continue
                 _cp_name = (_cp.get("name") or "").strip()
                 _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
+                # Native, discovery-enabled records keep the fork's selected
+                # connection authority. Legacy custom_providers rows deliberately
+                # retain upstream's pre-warm discovery and transient fallback.
+                _cp_live_authority = (
+                    bool(_slug)
+                    and _cp_name.lower() not in _legacy_custom_names
+                    and _configured_live_provider_record(_slug, cfg) is not None
+                )
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp.get("display_name") or _cp_name, [])
 
@@ -11669,8 +11974,34 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         # #7176: a shared-URL entry whose credential (even none)
                         # differs must not inherit the active probe's catalog.
                         auto_detected_models_by_provider.pop(_slug, None)
-                    _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
+                    _live_models = []
+                    if _cp_live_authority:
+                        _authority_status = {}
+                        _authority_timeout = (
+                            custom_probe_schedule.next_timeout()
+                            if _slug not in _live_provider_memo else None
+                        )
+                        _live_models = _models_from_live_provider_ids(
+                            _slug,
+                            cast(list[str], _memoized_live_lookup(
+                                _slug,
+                                lambda s=_slug: _read_live_provider_model_ids(
+                                    s, timeout_seconds=_authority_timeout,
+                                    probe_status=_authority_status,
+                                ),
+                            )),
+                        )
+                        if (_authority_status.get("unavailable")
+                                and _authority_timeout is not None
+                                and _authority_timeout < CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS):
+                            # Reuse upstream's partial/continuation contract: a
+                            # sliced miss is not a 24-hour authoritative empty.
+                            _truncated_probes.add(("configured-live", _slug))
+                        if not _live_models:
+                            _live_error = _custom_endpoint_error(_slug)
+                    else:
+                        _live_models = auto_detected_models_by_provider.get(_slug)
                     if _cp_has_configured_models:
                         # Skip the live /v1/models probe when an allowlist
                         # exists — the curated list wins and probe failures
@@ -11714,6 +12045,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if _cp_model:
                     _cp_model_ids.append(_cp_model)
                 for _cp_model_id in _configured_model_ids(_cp.get("models")):
+                    if _cp_live_authority:
+                        continue
                     if _cp_model_id not in _cp_model_ids:
                         _cp_model_ids.append(_cp_model_id)
 
@@ -12223,6 +12556,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # that appear in _PROVIDER_MODELS but not in cfg.
                     _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
                     provider_cfg = _get_provider_cfg(_raw_key)
+                    provider_name = str(provider_cfg.get("name") or "").strip() or provider_name
+                    _configured_live_authority = _configured_live_provider_record(pid, cfg) is not None
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
@@ -12237,6 +12572,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # live catalog first (static _PROVIDER_MODELS is fallback only).
                     _uses_models_as_settings_map = (
                         pid == "copilot"
+                        or _configured_live_authority
                         or _provider_models_are_discovered_catalog(provider_cfg)
                     )
                     if (
@@ -12265,6 +12601,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             if (
                                 not raw_models
                                 and _provider_models_are_discovered_catalog(provider_cfg)
+                                and not _configured_live_authority
                             ):
                                 # A transient live-catalog failure must not drop a
                                 # provider's persisted discovered models (the empty
@@ -12276,11 +12613,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                     copy.deepcopy(_PROVIDER_MODELS.get(pid, [])),
                                 )
 
-                    if not raw_models:
+                    if not raw_models and not _configured_live_authority:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
 
                     detected_models = auto_detected_models_by_provider.get(pid, [])
-                    if detected_models and not raw_models:
+                    if detected_models and not raw_models and not _configured_live_authority:
                         raw_models = copy.deepcopy(detected_models)
                     _append_picker_group(provider_name, pid, raw_models)
                 else:
@@ -12384,14 +12721,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 }
                 if _norm_model_id(default_model) not in existing_ids_norm:
                     label = _get_label_for_model(default_model, groups)
-                    target_display = (
-                        _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
-                        if active_provider
-                        else ""
-                    )
                     injected = False
                     for g in groups:
-                        if target_display and g.get("provider", "").lower() == target_display:
+                        if active_provider and g.get("provider_id") == active_provider:
                             g["models"].insert(0, {"id": default_model, "label": label})
                             injected = True
                             break
@@ -12932,6 +13264,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             if _models_rebuild_superseded(rebuild_seq):
                                 return
                         for key in _truncated_probes:
+                            if key[0] == "configured-live":
+                                _live_provider_memo.pop(key[1], None)
                             _custom_endpoint_probe_memo.pop(key, None)
                             # A surviving HTTP attempt owns only its private box.
                             # It cannot publish or write into this build's memo.
@@ -13771,12 +14105,16 @@ def publish_pre_admission_claim(stream_id: str, *, streams_lock_held: bool = Fal
     if not stream_id:
         return ""
     claim_token = uuid.uuid4().hex
-    if streams_lock_held:
+    def publish():
+        if restart_drain_active():
+            raise RunAdmissionDrainingError('WebUI is draining for a supervised restart')
         PRE_ADMISSION_CLAIMS[stream_id] = claim_token
         return claim_token
+
+    if streams_lock_held:
+        return publish()
     with STREAMS_LOCK:
-        PRE_ADMISSION_CLAIMS[stream_id] = claim_token
-    return claim_token
+        return publish()
 
 
 def retire_pre_admission_claim_if_owned(
@@ -14197,8 +14535,50 @@ def active_run_cancel_is_stale(
         return False
 
 
-def register_active_run(stream_id: str, **metadata) -> None:
-    """Mark a WebUI agent worker as alive until its outer finally exits."""
+class RunAdmissionDrainingError(RuntimeError):
+    """Raised when this WebUI process is draining for a supervised restart."""
+
+
+def _restart_drain_marker_path(pid: int | None = None) -> Path:
+    root = Path(
+        os.getenv("HERMES_WEBUI_RESTART_DRAIN_DIR")
+        or (_DEFAULT_STATE_HOME / "webui" / "restart-drain")
+    ).expanduser()
+    return root / f"{os.getpid() if pid is None else int(pid)}.json"
+
+
+def restart_drain_active() -> bool:
+    """Check generation-bound markers; retain fail-closed legacy compatibility."""
+    try:
+        with _restart_drain_marker_path().open() as handle:
+            raw = handle.read(4097)
+        if len(raw) > 4096:
+            return True
+        marker = json.loads(raw)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    if not isinstance(marker, dict) or 'server_started_at' not in marker:
+        return True
+    generation = marker['server_started_at']
+    import math
+    if type(generation) not in (int, float) or not math.isfinite(generation) or generation <= 0:
+        return True
+    return generation == SERVER_START_TIME
+
+
+def clear_startup_restart_drain() -> None:
+    """A fresh server image has no accepted drain, including same-PID exec."""
+    _restart_drain_marker_path().unlink(missing_ok=True)
+
+
+def register_active_run(stream_id: str, *, streams_lock_held: bool = False, **metadata) -> None:
+    """Admit a worker, preserving a positively owned launch accepted before drain.
+
+    Callers already holding STREAMS_LOCK must say so; it is not reentrant.
+    The launch claim and owner are read under that lock before ACTIVE_RUNS_LOCK.
+    """
     if not stream_id:
         return
     now = time.time()
@@ -14206,8 +14586,24 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("stream_id", stream_id)
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
-    with ACTIVE_RUNS_LOCK:
-        ACTIVE_RUNS[stream_id] = entry
+
+    def register():
+        session_id = entry.get('session_id')
+        preclaimed = (
+            isinstance(session_id, str) and bool(session_id)
+            and stream_id in STREAMS and bool(PRE_ADMISSION_CLAIMS.get(stream_id))
+            and stream_owner_session_id(stream_id) == session_id
+        )
+        with ACTIVE_RUNS_LOCK:
+            if restart_drain_active() and not preclaimed:
+                raise RunAdmissionDrainingError("WebUI is draining for a supervised restart")
+            ACTIVE_RUNS[stream_id] = entry
+
+    if streams_lock_held:
+        register()
+    else:
+        with STREAMS_LOCK:
+            register()
 
 
 def update_active_run(stream_id: str, **metadata) -> None:

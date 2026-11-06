@@ -1043,11 +1043,30 @@ def test_custom_slug_cold_stale_not_picked_still_strips_5979():
     assert model == bare, f"unmarked stale cold custom:slug id must strip (legacy), got {model!r}"
 
 
-def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979(monkeypatch):
+def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979(monkeypatch, tmp_path):
     """The send-path warm helper publishes provenance from a valid disk cache
     when memory is cold — restoring the endpoint-advertised signal so #433
     strips and #5979 preserves — WITHOUT a live rebuild.
     """
+    # This test deliberately overrides config in memory; match its path identity
+    # as well as its content so a prior profile test cannot trigger a reload.
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path())
+    monkeypatch.setattr(config, "_cfg_has_in_memory_overrides", lambda: True)
+    # Exercise provenance from a real-shaped endpoint response, rather than
+    # relying on a preceding test's provider stubs or configured fallback IDs.
+    import io
+    import json
+    import urllib.request
+    endpoint_calls = []
+    def endpoint_response(request, **_kwargs):
+        url = getattr(request, "full_url", str(request))
+        endpoint_calls.append(url)
+        if url != 'https://proxy.example/v1/models':
+            raise OSError('outside this fixture endpoint')
+        return io.BytesIO(json.dumps({'data': [{'id': 'x-ai/grok-4.5'}, {'id': 'x-ai/grok-composer-2.5-fast'}]}).encode())
+    monkeypatch.setattr(urllib.request, 'urlopen', endpoint_response)
+    monkeypatch.setenv('LLM_PROXY_API_KEY', 'fixture-auth-not-a-real-key')
+    monkeypatch.setattr(config, '_LIVE_REBUILD_BUDGET_SECONDS', 0.0)
     old_cfg = dict(config.cfg)
     config.cfg.clear()
     config.cfg.update({
@@ -1057,10 +1076,17 @@ def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979(monkeyp
                               'key_env': 'LLM_PROXY_API_KEY',
                               'models': ['x-ai/grok-4.5', 'x-ai/grok-composer-2.5-fast']}],
     })
+    fixture_config = tmp_path / 'config.yaml'
+    fixture_config.write_text(json.dumps(config.cfg))
+    monkeypatch.setenv('HERMES_CONFIG_PATH', str(fixture_config))
+    monkeypatch.setattr(config, '_get_config_path', lambda: fixture_config)
+    monkeypatch.setattr(config, '_get_models_cache_path', lambda: tmp_path / 'models.json')
     try:
-        # Build + persist to disk, then simulate a cold memory cache (restart).
+        # Build + persist to this test's disk cache, then simulate a cold memory cache.
+        config.reload_config()
         config.invalidate_models_cache()
-        config.get_available_models()  # publishes to memory + disk
+        built = config.get_available_models(force_refresh=True)
+        assert 'https://proxy.example/v1/models' in endpoint_calls, {'endpoints': endpoint_calls, 'groups': [g.get('provider_id') for g in built.get('groups', [])]}
         assert config._models_cache_provenance is not None
         # Simulate cold memory but valid disk cache (do NOT delete disk).
         config._available_models_cache = None

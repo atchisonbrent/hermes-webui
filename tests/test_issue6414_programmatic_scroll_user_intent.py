@@ -187,6 +187,8 @@ function _messageVirtualPrependedHeightDelta() {{ return null; }}
 function _advanceVisibleBaselineForServerKnownRows() {{}}
 function requestAnimationFrame() {{ return 0; }}
 {_function_body('_freshProgrammaticScrollActive')}
+{_function_body('_adoptUserInputReceipts')}
+{_function_body('_reconcileRunningMessageWindow', SESSIONS_JS)}
 {_function_body('_loadOlderMessages', SESSIONS_JS)}
 
 await _loadOlderMessages();

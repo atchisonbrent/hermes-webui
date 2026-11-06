@@ -14147,7 +14147,7 @@ async function _runCronPollTick(){
   _cronPollInFlight=true;
   try{
     const pollGeneration=_cronPollGeneration;
-    const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+    const data=await api(`/api/crons/recent?since=${_cronPollSince}`,{timeoutToast:false,retries:0});
     if(pollGeneration!==_cronPollGeneration) return;
     if(data.completions&&data.completions.length>0){
       for(const c of data.completions){

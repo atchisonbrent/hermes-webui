@@ -437,7 +437,7 @@ def test_live_processed_anchor_renders_before_first_activity_row():
 def test_live_processed_anchor_starts_before_chat_start_returns_stream_id():
     send = _function_body(MESSAGES_JS, "send")
 
-    optimistic_idx = send.index("S.messages.push(userMsg);renderMessages();setBusy(true);")
+    optimistic_idx = send.index("S.messages.push(userMsg);renderMessages({reuseSettledTurns:true,priorToolCalls});setBusy(true);")
     started_idx = send.index("if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;", optimistic_idx)
     ensure_idx = send.index("if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();", optimistic_idx)
     fallback_idx = send.index("else appendThinking('',{pending:true});", ensure_idx)
@@ -757,7 +757,7 @@ def test_settled_anchor_scene_carries_live_disclosure_state_by_stream():
     key = _function_body(UI_JS, "_worklogDetailBaseKey")
 
     assert "const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');" in settled
-    assert "_copyActivityDisclosureState(`live:${streamId}`, activityKey)" in settled
+    assert "_copyActivityDisclosureState(`live:${streamId}`, disclosureKey)" in settled
     assert "streamId," in settled
     assert "data-anchor-stream-id" in group
     assert "stream:${activity.getAttribute('data-anchor-stream-id')}" in key
@@ -829,7 +829,10 @@ def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
     attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = cancel.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
     render_idx = cancel.index("renderMessages({preserveScroll:true});")
-    assert fetch_idx < offset_idx < attach_idx < carry_idx < render_idx
+    # Both the offset and filtered rows must exist before scene attachment;
+    # upstream now establishes the offset before filtering the payload.
+    assert offset_idx < attach_idx
+    assert fetch_idx < attach_idx < carry_idx < render_idx
 
     embedded_idx = cancel.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
     # #7310/#7625: the HTTP fallback is a bounded tail now (full-transcript
@@ -1147,7 +1150,7 @@ def test_anchor_owned_settled_turn_skips_legacy_worklog_rebuild():
     assert "const anchorOwnedAssistantRawIdxs=new Set();" in render
     assert "msg._anchor_activity_scene" in render
     assert "anchorOwnedAssistantRawIdxs.add(idx)" in render
-    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;" in render
+    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;" in render
     assert "if(anchorOwnedAssistantRawIdxs.has(rawIdx)) return;" in render
     assert "S.messages.indexOf(m)" not in render
     assert "S.messages.some((m,rawIdx)=>" in render
@@ -1176,10 +1179,10 @@ def test_transparent_stream_renders_persisted_anchor_scene_after_reload():
     assert "_syncTransparentEventControls(turn)" in transparent
     # tool + thinking rows are rendered as transparent event rows
     assert "_decorateTransparentEventRow(_thinkingActivityNode" in row
-    assert "_decorateTransparentEventRow(buildToolCard(toolCall)" in row
+    assert "_decorateTransparentEventRow(buildToolCard(toolCall,{deferDetail:settled})" in row
     assert "_transparentToolStatus(toolCall,settled)" in row
     assert 'data-anchor-settled-scene-row' in row
-    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;" in render
+    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)||reusedAssistantIdxs.has(aIdx)) continue;" in render
 
 
 def test_live_anchor_scene_snapshot_renders_transparent_rows_before_compact_gate():
@@ -1251,6 +1254,9 @@ class FakeElement {{
     }};
   }}
   get parentElement(){{ return this.parentNode; }}
+  get nextSibling(){{ return this.parentNode?.children[this.parentNode.children.indexOf(this)+1]||null; }}
+  get nextElementSibling(){{ return this.nextSibling; }}
+  after(node){{ this.parentNode.insertBefore(node,this.nextSibling); }}
   get firstChild(){{ return this.children[0]||null; }}
   setAttribute(name,value){{
     const str=String(value);
@@ -1410,12 +1416,15 @@ global._anchorSceneWorklogGroup=(blocks, opts)=>{{
 global._renderAnchorSceneRowsIntoWorklog=(group, rows)=>{{
   compactRenders++;
   group.setAttribute('data-rendered-count',String(rows.length));
+  group._prose=rows.filter(r=>r.role==='prose').map(r=>r.text);
   return true;
 }};
 global._syncToolCallGroupSummary=()=>{{}};
 
     eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
     eval(extractFunc('_anchorSceneTransparentNodeForRow'));
+    eval(extractFunc('_liveSceneRowsWithUserInputs'));
+    eval(extractFunc('_anchorScenePlaceChildren'));
     eval(extractFunc('renderLiveAnchorActivityScene'));
     eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
     eval(extractFunc('_transparentLiveRowKey'));
@@ -1426,8 +1435,10 @@ global._syncToolCallGroupSummary=()=>{{}};
     eval(extractFunc('_refreshTransparentThinkingLiveRow'));
     eval(extractFunc('_refreshTransparentLiveRow'));
     document.documentElement = document.documentElement || Object.create(null);
-eval(extractFunc('_syncTransparentEventTimestampVisibility'));
+eval(extractFunc('_worklogDetailsExpandedDefault'));
+eval(extractFunc('_anchorSceneRetainedRowSignature'));
 eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_syncTransparentEventTimestampVisibility'));
 eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
@@ -1495,6 +1506,7 @@ process.stdout.write(JSON.stringify({{
   compactRenders,
   compactSessionId:liveTurn.dataset.sessionId,
   compactRenderedCount:liveTurn.querySelector('.tool-worklog-group').getAttribute('data-rendered-count'),
+  compactProse:liveTurn.querySelector('.tool-worklog-group')._prose,
 }}));
 """
     result = _run_node_script(script)
@@ -1514,6 +1526,7 @@ process.stdout.write(JSON.stringify({{
     assert result["compactRenders"] == 1
     assert result["compactSessionId"] == "sid-1"
     assert result["compactRenderedCount"] == "4"
+    assert result["compactProse"] == ["progress one", "progress two"]
 
 
 def test_transparent_anchor_intermediate_prose_preserved_only_final_answer_suppressed():
@@ -1525,7 +1538,7 @@ def test_transparent_anchor_intermediate_prose_preserved_only_final_answer_suppr
     # the prose branch must RENDER intermediate prose via the shared node builder,
     # gated only on the final-answer match — NOT an unconditional `return null`.
     assert "row.role==='prose'" in row
-    assert "_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)" in row
+    assert "_anchorSceneProseMatchesFinalAnswer(row._proseMessageText||text,finalAnswer)" in row
     assert "_anchorSceneNodeForRow(row,{settled})" in row, (
         "intermediate prose must be rendered as an inline assistant-segment node, "
         "not dropped"
@@ -1769,7 +1782,7 @@ def test_done_follow_scroll_uses_pre_settle_follow_state():
     done = _event_listener_body(MESSAGES_JS, "done")
 
     capture_idx = done.index("const shouldFollowOnDone=")
-    render_idx = done.index("syncTopbar();renderMessages({preserveScroll:true});")
+    render_idx = done.index("syncTopbar();renderMessages({preserveScroll:true,reuseSettledTurns:true});")
     follow_idx = done.index("if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();")
     assert capture_idx < render_idx < follow_idx
     after_render = done[render_idx:follow_idx]

@@ -13,7 +13,7 @@ function helperContext() {
   // not Python mirrors or a replacement ownership predicate.
   for (const name of [
     'msgContent', '_isRecoveryControlMessageText', '_isRecoveryControlMessage',
-    '_assistantAnchorSceneFinalAnswerText', '_messageHasReasoningPayload',
+    '_assistantAnchorSceneFinalAnswerText', '_assistantDisplayCommentary', '_messageHasReasoningPayload',
     '_isAssistantEmptyPlaceholderContent', '_assistantMessageHasVisibleContent',
     '_assistantReasoningPayloadText', '_assistantToolAnchorIdxForMessage',
   ]) {

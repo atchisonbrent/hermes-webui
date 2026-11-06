@@ -39,7 +39,7 @@ def test_terminal_done_render_preserves_manual_scroll_after_active_stream_is_cle
     done_block = _event_listener_body(MESSAGES_JS, "done")
 
     clear_idx = done_block.index("S.activeStreamId=null")
-    render_idx = done_block.index("renderMessages({preserveScroll:true})")
+    render_idx = done_block.index("renderMessages({preserveScroll:true,reuseSettledTurns:true})")
 
     assert clear_idx < render_idx, (
         "the done handler should clear stream liveness before the final render, "

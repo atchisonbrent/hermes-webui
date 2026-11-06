@@ -1008,6 +1008,8 @@ function _messageVirtualWindowKeyFor(){ return 'window-key'; }
 function _messageRenderCacheSignature(){ return 'signature'; }
 function _rehydrateTransparentStreamDom(){}
 function _rehydrateDeferredWorklogsFromCache(){}
+function _renderUserInputReceipts(){}
+function _placeSettledCompactWorklogs(){}
 function _wireMessageWindowLoadEarlierButton(){}
 function _updateMessageVirtualMeasurements(){}
 function requestAnimationFrame(){}

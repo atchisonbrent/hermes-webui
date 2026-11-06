@@ -616,4 +616,4 @@ def test_stream_done_handler_wires_the_in_place_collapse_before_the_fallback():
     disarm_idx = messages_js.index("_disarmKeepSettledWorklogOpen()")
     after = messages_js[disarm_idx : disarm_idx + 1100]
     assert "&& _collapseJustSettledWorklogInPlace(_settledStreamId)" in after
-    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot})" in after
+    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot,reuseSettledTurns:true})" in after

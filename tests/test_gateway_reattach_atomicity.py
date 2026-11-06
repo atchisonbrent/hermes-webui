@@ -254,6 +254,40 @@ def test_stop_teardown_never_deletes_a_successors_active_run_row(monkeypatch):
     )
 
 
+@pytest.mark.parametrize('successor', [False, True])
+def test_drain_before_reattach_worker_retires_only_its_claim(monkeypatch, tmp_path, successor):
+    import os
+    _RecordingThread.launched = []
+    monkeypatch.setattr(gateway_chat.threading, 'Thread', _RecordingThread)
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+    session = _FakeSession(pending_started_at=time.time() - 3600)
+    assert gateway_chat._resume_gateway_run_for_session(session) is True
+    worker = _RecordingThread.launched[-1]
+    if successor:
+        config.ACTIVE_RUNS[STREAM_ID]['claim_token'] = 'successor-token'
+    (tmp_path / f'{os.getpid()}.json').write_text('{}\n')
+    gateway_chat._run_gateway_chat_streaming(*worker.args, **worker.kwargs)
+    if successor:
+        assert config.ACTIVE_RUNS[STREAM_ID]['claim_token'] == 'successor-token'
+    else:
+        assert STREAM_ID not in config.ACTIVE_RUNS
+        assert routes._run_lifecycle_health()['active_runs'] == 0
+
+
+def test_reattach_refuses_drain_without_orphaned_state(monkeypatch, tmp_path):
+    import os
+
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+    (tmp_path / f'{os.getpid()}.json').write_text('{}\n')
+    session = _FakeSession(pending_started_at=time.time() - 3600)
+    assert gateway_chat._resume_gateway_run_for_session(session) is False
+    assert STREAM_ID not in config.STREAMS
+    assert STREAM_ID not in config.CANCEL_FLAGS
+    assert STREAM_ID not in config.ACTIVE_RUNS
+    assert session.gateway_run['run_id'] == RUN_ID
+    assert session.active_stream_id == STREAM_ID
+
+
 def test_second_reattach_of_the_same_stream_is_refused(monkeypatch):
     """The registration guard still refuses a stream that is already registered."""
     monkeypatch.setattr(gateway_chat.threading, "Thread", _RecordingThread)

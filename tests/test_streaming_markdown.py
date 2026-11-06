@@ -532,7 +532,7 @@ class TestDoneEventSmd:
         The live stream path can be visually at bottom while _scrollPinned was
         knocked false by history/windowing/layout preservation. On `done`, the
         live DOM is replaced with persisted messages; if the handler blindly calls
-        renderMessages({preserveScroll:true}) while the pin flag is false, the
+        renderMessages({preserveScroll:true,reuseSettledTurns:true}) while the pin flag is false, the
         transcript can jump to the top. Capture bottom/follow intent before the
         replacement and explicitly bottom only for those users.
         """
@@ -543,7 +543,7 @@ class TestDoneEventSmd:
             "continue following before replacing the live DOM."
         )
         follow_idx = fn.index("shouldFollowOnDone")
-        render_idx = fn.index("renderMessages({preserveScroll:true})")
+        render_idx = fn.index("renderMessages({preserveScroll:true,reuseSettledTurns:true})")
         assert follow_idx < render_idx, (
             "Follow intent must be captured before renderMessages() replaces the "
             "live transcript DOM."
@@ -586,7 +586,7 @@ class TestDoneEventSmd:
         """
         fn = self.get_fn()
         assert fn, "'done' handler not found"
-        done_before_render = fn[:fn.index("renderMessages({preserveScroll:true})")]
+        done_before_render = fn[:fn.index("renderMessages({preserveScroll:true,reuseSettledTurns:true})")]
         assert "const hasMessageToolMetadata=S.messages.some" in done_before_render
         assert "!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length" in done_before_render
         assert "S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map" in done_before_render

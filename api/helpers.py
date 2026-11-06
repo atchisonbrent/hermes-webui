@@ -1962,10 +1962,16 @@ def _redact_nested_message_containers(value, *, _enabled: bool):
 def public_session_projection(session_dict: dict) -> dict:
     """Return a public session payload with redaction and alias stripping.
 
-    Callers use this for every response/export/SSE session payload.  It never
-    mutates the in-memory session or the caller's dictionary.
+    Shared projector for public session payloads; some legacy paths still use
+    the lower-level redactor. This never mutates the in-memory session or the
+    caller's dictionary.
     """
-    return redact_session_data(session_dict)
+    result = redact_session_data(session_dict)
+    session_id = result.get("session_id")
+    if isinstance(session_id, str) and session_id.startswith(("claude_code_", "antigravity_")):
+        # An old sidecar cannot override ownership of a native namespace.
+        result.update(read_only=True, can_resume=False)
+    return result
 
 
 def strip_public_internal_fields(value, *, message_records: bool = False):
@@ -2006,6 +2012,11 @@ def redact_session_data(session_dict: dict) -> dict:
             result[key] = _redact_text(value, _enabled=_enabled)
         elif key in {'messages', 'context_messages'}:
             result[key] = _redact_messages(value, _enabled=_enabled, _active_turn_token=_active_turn_token)
+        elif key == '_user_inputs' and isinstance(value, list):
+            result[key] = [
+                {**_copy_json_value(entry), 'content': _redact_text(entry.get('content', ''), _enabled=_enabled)}
+                for entry in value if isinstance(entry, dict)
+            ]
         elif key == 'tool_calls' and isinstance(value, list):
             result[key] = _redact_tool_calls(value, _enabled=_enabled)
         elif key in {'todo_state', 'runtime_journal_snapshot'}:

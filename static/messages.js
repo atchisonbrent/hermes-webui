@@ -2088,6 +2088,7 @@ async function send(){
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
+  const priorToolCalls=S.toolCalls;
   // #7882 (greptile round-4 P2): visible-length of the transcript BEFORE the
   // optimistic push — the local tail the server could already know. Passed to
   // every upsertActiveSessionForLocalTurn call of this send so the visible-count
@@ -2099,7 +2100,7 @@ async function send(){
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
+    S.messages.push(userMsg);renderMessages({reuseSettledTurns:true,priorToolCalls});setBusy(true);
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else appendThinking('',{pending:true});
@@ -2454,7 +2455,10 @@ function _bindStreamHiddenTracker(){
   if(_streamHiddenTrackerBound||typeof document==='undefined'||typeof document.addEventListener!=='function') return;
   _streamHiddenTrackerBound=true;
   document.addEventListener('visibilitychange',()=>{
-    if(document.hidden){ for(const k in _STREAM_WAS_HIDDEN){ const e=_STREAM_WAS_HIDDEN[k]; if(e) e.wasHidden=true; } }
+    if(document.hidden){
+      for(const k in _STREAM_WAS_HIDDEN){ const e=_STREAM_WAS_HIDDEN[k]; if(e) e.wasHidden=true; }
+      for(const live of Object.values(LIVE_STREAMS)){if(live) live.wasHidden=true;}
+    }
   });
 }
 function _clearStreamHidden(sid, streamId){
@@ -2752,6 +2756,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _streamRecoveryControlMessageText(text){
     const normalized=String(text||'').replace(/\s+/g,' ').trim();
     if(!normalized) return false;
+    if(normalized==='[System: Your previous response contained only internal reasoning and never produced a visible answer or tool call. Do not keep thinking. Produce your final answer as plain text now (or make the tool call you were planning).]') return true;
     const systemRecovery=/^\[System:/i.test(normalized)
       && (/continue exactly where you left off/i.test(normalized)
         || /do not retry the same tool call/i.test(normalized));
@@ -2885,6 +2890,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
   }
   function _finalizeStreamEndFallback(source){
+    if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
     _clearStreamEndRecovery();
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
@@ -2918,7 +2924,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     _streamEndRecoveryTimer=null;
     const status=await _restoreSettledSession(source,{status:true});
-    if(status==='restored'){
+    if(status==='restored'||status==='stale'){
       _clearStreamEndRecovery();
       return;
     }
@@ -3098,6 +3104,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
   let _deferredStreamRecoveryBound=false;
+  let _foregroundRecoveryPending=false;
   let _pendingStreamEndRecovery=false;
   let _streamEndRecoveryTimer=null;
   let _streamEndRecoveryAttempts=0;
@@ -3108,14 +3115,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _reattachOrRestoreAfterDeferredStreamError(source){
-    if(_terminalStateReached||_streamFinalized) return;
-    if((S.session&&S.session.session_id)!==activeSid) return;
+    const ownsRecovery=()=>!_terminalStateReached&&!_streamFinalized&&
+      _isSessionCurrentPane(activeSid)&&LIVE_STREAMS[activeSid]?.source===source;
+    if(_foregroundRecoveryPending||!ownsRecovery()) return;
+    _foregroundRecoveryPending=true;
     (async()=>{
+      try{
       try{
         if(streamId){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+          if(!ownsRecovery()) return;
           if(st.active){
+            // A suspended page may be hundreds of activity events behind.
+            // Reuse snapshot restoration (including its replay cursor) instead
+            // of repainting the entire worklog for every missed event.
+            if(typeof loadSession==='function'&&typeof _serverLiveSnapshotInflight==='function'){
+              let data;
+              try{data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=0&resolve_model=0`);}catch(_){}
+              if(!ownsRecovery()) return;
+              const snapshot=_serverLiveSnapshotInflight(data?.session?.runtime_journal_snapshot,[]);
+              if(data?.session?.session_id===activeSid&&data.session.active_stream_id===streamId&&snapshot?.streamId===streamId){
+                await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,_resumeSnapshot:data});
+                if(!ownsRecovery()) return;
+              }
+            }
             setComposerStatus('Reconnected',1000);
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+            return;
+          }
+          if(st.replay_available){
+            setComposerStatus('Restoring stream…');
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
@@ -3123,12 +3152,122 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){
         if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(!ownsRecovery()) return;
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(!ownsRecovery()) return;
       if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
+      // Snapshot recovery is an optimization, not a reduced retry budget.
+      if(LIVE_STREAMS[activeSid]) LIVE_STREAMS[activeSid].wasHidden=false;
+      await _retryStreamAfterError(source);
+      }finally{_foregroundRecoveryPending=false;}
+    })();
+  }
+
+  async function _retryStreamAfterError(source){
+      // Keep the closed transport's ownership entry until replacement or terminal
+      // settlement. A hidden-page defer must be able to resume this same owner.
+      try{source.close();}catch(_){}
+      // If the user has switched to a different session, don't attempt to
+      // reconnect — the old stream's EventSource was closed intentionally
+      // during session switch and reconnecting would leak a background stream.
+      if(!_isSessionCurrentPane(activeSid)) return;
+      if(_terminalStateReached || _streamFinalized){
+        return;
+      }
+      // Materialize the already-received assistant text before any async
+      // reconnect probe can replace or repaint the live turn. Transport recovery
+      // must not leave the last visible frame pending behind the backoff timer.
+      _flushPendingSegmentRender();
+      // Attempt several reconnect/replay probes before declaring the turn lost.
+      // A short-lived SSE error can arrive while the worker is still running or
+      // while the run-journal replay file is just becoming visible. The old
+      // single 1.5s probe could fall through to _handleStreamError(), clearing
+      // S.activeStreamId/INFLIGHT and rendering a connection-interrupted marker
+      // even though the backend was still producing tokens; the settled response
+      // then reappeared later from sidecar/replay. Keep the live DOM/state intact
+      // during this retry window and only surface an error after all probes fail.
+      if(!_reconnectAttempted && streamId){
+        _reconnectAttempted=true;
+        const _retryDelays=[1500,3000,5000,8000,12000,20000];
+        setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
+        const _probeReconnect=async(attempt=0)=>{
+          if(_terminalStateReached || _streamFinalized) return;
+          if(!_isSessionCurrentPane(activeSid)) return;
+          try{
+            const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+            if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+            if(st&&st.active){
+              setComposerStatus('Reconnected',1000);
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              return;
+            }
+            if(st&&st.replay_available){
+              setComposerStatus('Restoring stream…');
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              return;
+            }
+          }catch(_){
+            if(_deferStreamErrorIfOffline()) return;
+          }
+          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
+          if(_deferStreamErrorIfOffline()) return;
+          if(_deferStreamErrorIfPageHidden(source)) return;
+          const nextDelay=_retryDelays[attempt+1];
+          if(nextDelay){
+            setComposerStatus(`Reconnecting… (${attempt+2}/${_retryDelays.length})`);
+            setTimeout(()=>{void _probeReconnect(attempt+1);}, nextDelay);
+            return;
+          }
+          // Last-ditch: the stream may have finished while we were retrying.
+          // _restoreSettledSession polls the full session API (not just stream
+          // status) and can recover a completed response without an error banner.
+          // This is especially important on iOS where Tailscale reconnects can
+          // take longer than the retry window.
+          setComposerStatus('Restoring session…');
+          let _restoreTimedOut=false;
+          const _restoreTimer=setTimeout(()=>{
+            if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+            // If _restoreSettledSession hangs (flaky Tailscale), don't leave
+            // the UI stuck on "Restoring session…" forever. Fall through to
+            // _handleStreamError after 8s.
+            _restoreTimedOut=true;
+            if(!_terminalStateReached&&!_streamFinalized){
+              if(_deferStreamErrorIfOffline()) return;
+              if(_deferStreamErrorIfPageHidden(source)) return;
+              _flushReasoningToAnchor();
+              _scheduleAnchorRegistryCleanup(120000);
+              _handleStreamError(source);
+            }
+          },8000);
+          try{
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)){
+              if(_restoreTimedOut) return; // timer already fired _handleStreamError
+              clearTimeout(_restoreTimer);
+              return;
+            }
+          }catch(_){
+            // _restoreSettledSession threw. If the timer already fired,
+            // _handleStreamError was called there; we return below.
+            // Otherwise the code below cancels the timer and calls it directly.
+          }
+          if(_restoreTimedOut) return; // timer already fired _handleStreamError
+          clearTimeout(_restoreTimer);
+          if(_terminalStateReached||_streamFinalized) return;
+          if(_deferStreamErrorIfOffline()) return;
+          if(_deferStreamErrorIfPageHidden(source)) return;
+          _flushReasoningToAnchor();
+          _scheduleAnchorRegistryCleanup(120000);
+          _handleStreamError(source);
+        };
+        setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
+        return;
+      }
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(_deferStreamErrorIfOffline()) return;
+      if(_deferStreamErrorIfPageHidden(source)) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000);
       _handleStreamError(source);
-    })();
   }
 
   function _deferStreamErrorIfPageHidden(source){
@@ -3194,8 +3333,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     : '';
   const _STREAM_FADE_MS=620;
   const _STREAM_FADE_MAX_MS=900;
-  const _STREAM_FADE_DONE_MAX_MS=1000;
-  const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400;
   const _anchorApi=(typeof window!=='undefined'&&window.HermesAssistantTurnAnchors)
     ? window.HermesAssistantTurnAnchors
     : null;
@@ -3217,14 +3354,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
     setTimeout(()=>{
-      if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+      if(_anchorRegistryMap.get(streamId)!==_anchorRegistry) return;
+      const live=LIVE_STREAMS[activeSid];
+      if(live&&live.streamId===streamId&&S.busy&&S.activeStreamId===streamId&&_isSessionCurrentPane(activeSid)){
+        _scheduleAnchorRegistryCleanup(delayMs);
+        return;
+      }
+      // Age is not a terminal event. Open/connecting transports still need
+      // this registry for every subsequent scene projection and repaint.
+      if(live&&live.streamId===streamId&&live.source&&
+         (live.source.readyState!==2||_deferredStreamRecoveryBound)){
+        // A hidden-page error deliberately closes SSE until foreground return.
+        // That paused recovery still owns the running registry.
+        _scheduleAnchorRegistryCleanup(delayMs);
+        return;
+      }
+      _anchorRegistryMap.delete(streamId);
     },delayMs);
   }
-  // Backstop: schedule an identity-guarded cleanup at creation so this shadow
-  // registry self-expires no matter which teardown path the stream takes
-  // (incl. external ones like sidebar cancelSessionStream() that bypass the
-  // in-closure SSE handlers). Explicit terminal-path calls above just expire it
-  // sooner; this guarantees window._liveAnchorRegistries can't grow unbounded.
+  // Backstop: schedule an identity-guarded cleanup at creation. Keep checking
+  // while a transport owns the registry; expire it after teardown (including
+  // external cancellation paths that bypass the in-closure SSE handlers).
+  // Terminal paths also schedule shorter cleanup where appropriate.
   _scheduleAnchorRegistryCleanup(600000);
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
@@ -5476,7 +5627,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    const m=/^MEDIA:[ \t]*([^\s\)\]]+)$/.exec(String(chunk));
     const parts=m&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(String(chunk),0,m[1],entry&&entry.parent):null;
     const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
     if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
@@ -5526,7 +5677,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a grammar delimiter or
     // authoritative parser finalization proves the ref is complete.
-    const re=/MEDIA:([^\s\)\]]+)/g;
+    const re=/MEDIA:[ \t]*([^\s\)\]]+)/g;
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
@@ -5562,7 +5713,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
     const rest = combined.slice(last);
     if(rest){
-      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      const tailMatch = /MEDIA:[ \t]*[^\s\)\]]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
       if(tailValue && rest.length < _MEDIA_TAIL_MAX){
@@ -5933,45 +6084,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(delta) assistantBody.appendChild(document.createTextNode(delta));
     _streamFadeDomText=String(next.text||'');
     return next.caughtUp;
-  }
-  function _streamFadeCurrentDisplayText(){
-    const parsed=_parseStreamState();
-    return segmentStart===0
-      ? parsed.displayText
-      : _stripXmlToolCalls(assistantText.slice(segmentStart));
-  }
-  function _drainStreamFadeBeforeDone(onDone){
-    const drainStartedAt=performance.now();
-    let forcedDone=false;
-    const step=()=>{
-      if(!assistantBody){onDone();return;}
-      const target=_streamFadeCurrentDisplayText();
-      const caughtUp=_renderStreamingFadeMarkdown(target);
-      const anchorProcessText=_streamFadeDomText||target;
-      if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
-      scrollIfPinned();
-      if(caughtUp){
-        // parser_end can flush pending markdown text; include that final text in
-        // the fade wait instead of replacing it immediately in renderMessages().
-        if(_smdParser) _smdEndParser();
-        // Let the last released words visibly finish their stagger + fade before
-        // the final renderMessages() DOM replacement removes the live spans.
-        const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
-        setTimeout(onDone, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
-        return;
-      }
-      // Final SSE `done` means the canonical completed session is available.
-      // The optional word-fade playout must not keep that completed answer
-      // hidden behind the live Thinking state for large/bursty responses.
-      if(!forcedDone&&performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS){
-        forcedDone=true;
-        if(_smdParser) _smdEndParser();
-        onDone();
-        return;
-      }
-      setTimeout(()=>requestAnimationFrame(step), 33);
-    };
-    step();
   }
   function _flushPendingSegmentRender(options={}){
     _flushPendingReasoningRender();
@@ -6486,11 +6598,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof existingLive.cancelIdleRecovery==='function') existingLive.cancelIdleRecovery();
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    LIVE_STREAMS[activeSid]={streamId,source,dispose:(reconnecting=false)=>{
-      if(reconnecting) _flushPendingSegmentRender();
-      else _streamFinalized=true;
-      _cancelAnimationFramePendingStreamRender();
-    }};
+    LIVE_STREAMS[activeSid]={
+      streamId,source,wasHidden:document.hidden,
+      dispose:(reconnecting=false)=>{
+        if(reconnecting) _flushPendingSegmentRender();
+        else _streamFinalized=true;
+        _cancelAnimationFramePendingStreamRender();
+      }
+    };
     _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
 
     // Note on #631 Bug B: the original PR description stated the server
@@ -6914,6 +7029,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      // Claim completion before settling, so a subsequent stream_end cannot
+      // restore stale server data over the completed session (issue #3195).
       if(typeof _steerSettleTerminal==='function') _steerSettleTerminal(activeSid);
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
@@ -6998,6 +7115,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
+          const _loadedWindow=typeof _captureLoadedMessageWindow==='function'
+            ? _captureLoadedMessageWindow(activeSid) : null;
+          if(typeof _preserveLoadedMessageWindow==='function'){
+            d.session=_preserveLoadedMessageWindow(d.session,_loadedWindow);
+          }
           // #6112: capture the pre-settle transcript so the guard after the carry-forward can
           // put it back. `_carryForwardEphemeralTurnFields` returns the NEW list whenever
           // either side is empty, so a `done` payload with no messages blanked the whole
@@ -7185,16 +7307,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             ? _captureMessageScrollSnapshot()
             : null;
           if(typeof _armKeepSettledWorklogOpen==='function') _armKeepSettledWorklogOpen(_settledStreamId);
-          syncTopbar();renderMessages({preserveScroll:true});
+          syncTopbar();renderMessages({preserveScroll:true,reuseSettledTurns:true});
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
           const _collapsedInPlace=typeof _collapseJustSettledWorklogInPlace==='function'
             && _collapseJustSettledWorklogInPlace(_settledStreamId);
-          // #7676: in-place finalize; rebuild is fallback.
+          // In-place finalization is preferred; rebuilding is the fallback.
           const _settledInPlace=_collapsedInPlace||(typeof _finalizeJustSettledTransparentScene==='function'&&_finalizeJustSettledTransparentScene(_settledStreamId));
           if(!_settledInPlace&&typeof _renderMessagesWithScrollSnapshot==='function'){
-            _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
+            _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot,reuseSettledTurns:true});
           }else if(!_settledInPlace){
-            renderMessages({preserveScroll:true});
+            renderMessages({preserveScroll:true,reuseSettledTurns:true});
           }else if(_doneLiveScrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
             _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
           }
@@ -7242,11 +7364,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
-      if(_shouldUseLiveProseFade()&&assistantBody){
-        _cancelAnimationFramePendingStreamRender();
-        _drainStreamFadeBeforeDone(_finishDone);
-        return;
-      }
+      // The completed session is authoritative. Cosmetic word playout must not
+      // delay Markdown or idle state after the server is done.
       _finishDone();
     });
 
@@ -7271,7 +7390,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
       const status=await _restoreSettledSession(source,{status:true});
-      if(status==='restored'){
+      if(status==='restored'||status==='stale'){
         return;
       }
       if(status==='active'&&S.activeStreamId===streamId){
@@ -7461,6 +7580,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
+            // Keep the reader's loaded boundary on same-session terminal snapshots.
+            // Continuation/revision changes take the canonical helper fallback.
+            if(typeof _preserveLoadedMessageWindow==='function'){
+              d.session=_preserveLoadedMessageWindow(d.session,_captureLoadedMessageWindow(activeSid));
+            }
+            if(typeof _oldestIdx!=='undefined') _oldestIdx=d.session._messages_offset||0;
+            if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!d.session._messages_truncated;
             S.session=d.session;
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
@@ -7501,7 +7627,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isRecoveryControlMessage){
           (async()=>{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
             if(S.session&&S.session.session_id===activeSid){
               S.messages=_filterRecoveryControlMessages(S.messages||[]);
               _markSessionViewed(activeSid, S.messages.length);
@@ -7559,7 +7685,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    source.addEventListener('open',()=>{
+      // Retry budget belongs to a connection outage, not the entire run.
+      // Only a proven-open current transport can reset it.
+      if(LIVE_STREAMS[activeSid]?.source===source){
+        _reconnectAttempted=false;
+        if(!document.hidden) LIVE_STREAMS[activeSid].wasHidden=false;
+      }
+    });
     source.addEventListener('error',async e=>{
+      if(LIVE_STREAMS[activeSid]?.source!==source) return;
       if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
         return;
       }
@@ -7578,102 +7713,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
-      _closeSource(source);
-      // If the user has switched to a different session, don't attempt to
-      // reconnect — the old stream's EventSource was closed intentionally
-      // during session switch and reconnecting would leak a background stream.
-      if(!_isSessionCurrentPane(activeSid)) return;
-      if(_terminalStateReached || _streamFinalized){
+      // iOS may deliver the suspended connection's error only after visibility
+      // returns. It needs the same snapshot recovery as an error seen hidden.
+      if(LIVE_STREAMS[activeSid]?.wasHidden){
+        LIVE_STREAMS[activeSid].wasHidden=false;
+        _reattachOrRestoreAfterDeferredStreamError(source);
         return;
       }
-      // Attempt several reconnect/replay probes before declaring the turn lost.
-      // A short-lived SSE error can arrive while the worker is still running or
-      // while the run-journal replay file is just becoming visible. The old
-      // single 1.5s probe could fall through to _handleStreamError(), clearing
-      // S.activeStreamId/INFLIGHT and rendering a connection-interrupted marker
-      // even though the backend was still producing tokens; the settled response
-      // then reappeared later from sidecar/replay. Keep the live DOM/state intact
-      // during this retry window and only surface an error after all probes fail.
-      if(!_reconnectAttempted && streamId){
-        _reconnectAttempted=true;
-        const _retryDelays=[1500,3000,5000,8000,12000,20000];
-        setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
-        const _probeReconnect=async(attempt=0)=>{
-          if(_terminalStateReached || _streamFinalized) return;
-          if(!_isSessionCurrentPane(activeSid)) return;
-          try{
-            const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-            if(st&&st.active){
-              setComposerStatus('Reconnected',1000);
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
-              return;
-            }
-            if(st&&st.replay_available){
-              setComposerStatus('Restoring stream…');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
-              return;
-            }
-          }catch(_){
-            if(_deferStreamErrorIfOffline()) return;
-          }
-          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
-          if(_deferStreamErrorIfOffline()) return;
-          if(_deferStreamErrorIfPageHidden(source)) return;
-          const nextDelay=_retryDelays[attempt+1];
-          if(nextDelay){
-            setComposerStatus(`Reconnecting… (${attempt+2}/${_retryDelays.length})`);
-            setTimeout(()=>{void _probeReconnect(attempt+1);}, nextDelay);
-            return;
-          }
-          // Last-ditch: the stream may have finished while we were retrying.
-          // _restoreSettledSession polls the full session API (not just stream
-          // status) and can recover a completed response without an error banner.
-          // This is especially important on iOS where Tailscale reconnects can
-          // take longer than the retry window.
-          setComposerStatus('Restoring session…');
-          let _restoreTimedOut=false;
-          const _restoreTimer=setTimeout(()=>{
-            // If _restoreSettledSession hangs (flaky Tailscale), don't leave
-            // the UI stuck on "Restoring session…" forever. Fall through to
-            // _handleStreamError after 8s.
-            _restoreTimedOut=true;
-            if(!_terminalStateReached&&!_streamFinalized){
-              if(_deferStreamErrorIfOffline()) return;
-              if(_deferStreamErrorIfPageHidden(source)) return;
-              _flushReasoningToAnchor();
-              _scheduleAnchorRegistryCleanup(120000);
-              _handleStreamError(source);
-            }
-          },8000);
-          try{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})){
-              if(_restoreTimedOut) return; // timer already fired _handleStreamError
-              clearTimeout(_restoreTimer);
-              return;
-            }
-          }catch(_){
-            // _restoreSettledSession threw. If the timer already fired,
-            // _handleStreamError was called there; we return below.
-            // Otherwise the code below cancels the timer and calls it directly.
-          }
-          if(_restoreTimedOut) return; // timer already fired _handleStreamError
-          clearTimeout(_restoreTimer);
-          if(_terminalStateReached||_streamFinalized) return;
-          if(_deferStreamErrorIfOffline()) return;
-          if(_deferStreamErrorIfPageHidden(source)) return;
-          _flushReasoningToAnchor();
-          _scheduleAnchorRegistryCleanup(120000);
-          _handleStreamError(source);
-        };
-        setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
-        return;
-      }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
-      if(_deferStreamErrorIfOffline()) return;
-      if(_deferStreamErrorIfPageHidden(source)) return;
-      _flushReasoningToAnchor();
-      _scheduleAnchorRegistryCleanup(120000);
-      _handleStreamError(source);
+      await _retryStreamAfterError(source);
     });
 
     source.addEventListener('cancel',e=>{
@@ -7724,6 +7771,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           && !((typeof _isMessageReaderUnpinned==='function')
             ? _isMessageReaderUnpinned()
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
+        if(typeof _preserveLoadedMessageWindow==='function'){
+          sessionPayload=_preserveLoadedMessageWindow(sessionPayload,_captureLoadedMessageWindow(activeSid));
+        }
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=sessionPayload._messages_offset||0;
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!sessionPayload._messages_truncated;
         S.session=sessionPayload;
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
@@ -7794,6 +7846,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
+      if(_runJournalEventName!=='error') source.addEventListener(_runJournalEventName,()=>{
+        if(!document.hidden&&LIVE_STREAMS[activeSid]?.source===source) LIVE_STREAMS[activeSid].wasHidden=false;
+      });
     }
   }
 
@@ -7961,7 +8016,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
-      const session=data&&data.session;
+      // A successor can acquire this pane while the recovery GET is pending.
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return returnStatus?'stale':false;
+      let session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -7987,6 +8044,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
+        if(typeof _preserveLoadedMessageWindow==='function'){
+          session=_preserveLoadedMessageWindow(session,_captureLoadedMessageWindow(activeSid));
+        }
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
         S.session=session;
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
@@ -10299,6 +10361,12 @@ async function respondClarify(response) {
       body: JSON.stringify({ session_id: sid, response: value, clarify_id: clarifyId || "" })
     });
     if (result && result.ok) {
+      // Acceptance belongs to the submitted prompt, even if the next prompt
+      // arrived while the request was in flight. Do not create a model turn.
+      if(result.user_input&&typeof _rememberUserInputReceipt==='function'){
+        _rememberUserInputReceipt(sid,result.user_input);
+      }
+      if(result.display_recorded===false) showToast(t('user_input_save_failed'),5000);
       // Only clear/hide if the visible prompt still matches what was just
       // submitted.  If a parallel SSE event already loaded the next queued
       // prompt, erasing the session cache would leave the agent waiting
@@ -10308,8 +10376,8 @@ async function respondClarify(response) {
         _clarifyId = null;
         _clearClarifyPendingForSession(sid);
         hideClarifyCard(true, 'sent');
-        // Echo the user's clarify choice as a visible message in the conversation
-        if (S.session && S.session.session_id === sid) {
+        // Legacy servers lack receipts; retain their existing local echo.
+        if (!result.user_input && S.session && S.session.session_id === sid) {
           S.messages.push({
             role: 'user',
             content: value,

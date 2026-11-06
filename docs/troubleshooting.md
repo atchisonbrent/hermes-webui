@@ -242,6 +242,124 @@ bootstrap probe accepts either backend.
 
 ---
 
+## Running worklog splits into standalone Thinking rows
+
+A paginated transcript can start halfway through the current turn. Without its
+user-row boundary, saved partial assistant rows can look like settled history,
+separate from the live activity scene. This is distinct from a transport failure.
+
+The session response carries optional `_active_turn_boundary` metadata in the
+same coordinates as `_messages_offset`. It binds `user_index` to `stream_id`,
+using the eager checkpoint token or the unique exact pending-user timestamp in
+the merged transcript. Missing or ambiguous identity retains legacy recovery;
+no nearest-time or repeated-text matching is used. The browser restores the
+pending prompt before that tail, keeps one live owner during history expansion
+and refresh, and repaints its scene after transcript reconstruction. This is a
+display projection; durable transcript rows are not edited.
+
+A live scene registry must also outlive its transport: the ten-minute cleanup
+backstop now defers while the matching stream is open or reconnecting. Previously
+it deleted the registry mid-turn, causing later thinking to use standalone
+fallback cards. Closed/abandoned transports still expire, and stale timers cannot
+delete a replacement registry.
+
+Regression harness: `tests/browser_active_turn_page_boundary.py` exercises
+three cleanup intervals, later reasoning, active-session loading, older history,
+full-history loading and refresh at desktop/phone widths in Chromium and WebKit. Cleanup
+intervals are advanced deterministically, not thirty minutes of wall-clock time.
+These are browser-engine checks, not physical mobile-device certification.
+
+Boundary recovery uses the live journal/INFLIGHT projection for activity while
+the run is active. Recovery of persisted reasoning absent from both sources is
+not repaired here; durable rows remain available after settlement. Rounded
+pending timestamps without a matching checkpoint token use legacy recovery.
+
+## Steers and clarification answers in conversation history
+
+Accepted steers and clarification answers are saved as display receipts in the
+existing per-session turn journal. They have no turn ID, do not change model
+messages, and cannot cause turn recovery or replay the input. Session responses
+return them separately as `_user_inputs` when messages are requested, not on
+metadata-only polls. Receipt content uses the existing API credential redaction
+on both accepted responses and later loads. While an Anchor-owned run is live,
+its display projection places escaped receipt rows by recorded timestamp.
+These rows are not written into the Anchor registry or model messages.
+Presentation follows upstream v0.52.458: Compact uses the native Processed
+worklog, Transparent Stream shows activity inline, and Final answer only hides
+activity. Persisted public commentary is adapted into native prose rows; raw
+provider replay is not displayed. Final answers remain outside the worklog.
+
+The former nested assistant-update/activity-summary layer and its DOM-retention
+contract were retired. Upstream may rebuild worklog rows during repaint; zero
+tool-node reconstruction and preserved selection across every repaint are not
+current guarantees. Recovered updates without timestamps are not assigned an
+invented time. See `tests/browser_upstream_worklog.py` and
+`tests/browser_history_commentary.py` for current presentation coverage.
+Rows without event timestamps keep their original scene order; precise receipt
+interleaving requires recorded timestamps.
+A timestamp-free scene row can use the matching rendered message time, but text
+changed beyond whitespace (for example stripped display markers) may not match.
+Receipt times are normalized to seconds; a receipt with no usable timestamp is
+placed before activity rather than following the growing tail.
+Repeated rendering, including cached restores, dedupes by receipt ID rather than
+matching answer text. A journal read failure leaves the transcript available and
+shows a warning instead of silently implying there were no inputs.
+
+This starts with inputs accepted after backend activation; it does not invent
+historical entries from old tool output. Share/export projections do not include
+these display receipts. Older servers retain their existing
+local display behavior. If saving fails after acceptance, the UI reports that
+the input was accepted but its display entry could not be saved: **do not resend**.
+The browser keeps only the current session's receipt cache; other devices read
+the saved entries when loading or refreshing that conversation.
+
+Checks: `tests/test_user_input_receipts.py` exercises journal isolation, accepted
+and stale endpoint paths, save failure, and session readback.
+`tests/browser_user_input_receipts.py` exercises native submission handlers,
+reload, repeated rendering, HTML escaping, and session isolation with synthetic
+API/SSE fixtures in Chromium and WebKit at desktop/phone widths.
+
+## Internal reasoning-only recovery messages
+
+The exact built-in reasoning-only continuation nudge is filtered from transcript
+and live activity display, like other recovery controls. This is display-only:
+server-side history, user answers and reasoning are retained. Client display
+lists may omit the control row. Quoted text, workspace-wrapped text and messages
+with additional commentary remain visible. Legacy rows have no synthetic flag,
+so an otherwise identical user message or assistant echo is also classified as a
+recovery control. The literal comes from Hermes agent/conversation_loop.py
+`_CODEX_INCOMPLETE_NUDGE`; whitespace differences are normalized.
+
+`tests/test_issue4875_recovery_prompt_filter.py` covers exact-match boundaries;
+run `tests/browser_recovery_nudge_display.py` manually for the real rendered
+transcript in Chromium/WebKit at desktop and phone widths.
+
+## Resuming after mobile background suspension
+
+A connection error while hidden defers recovery until the page returns. The
+registry cleanup timer preserves that paused recovery owner, not just open
+transports. Errors delivered only after foreground return follow the same path.
+For a still-active run, recovery reuses the same-session snapshot loader and its
+journal cursor instead of painting every missed event. Connection drops with no
+pending suspension evidence retain the existing retry path. Snapshot recovery
+also falls back to that retry ladder after transient failures and honors available
+journal replay for stopped workers. Recovery validates and consumes
+the same fetched snapshot; if none is available, the incremental transport keeps
+its existing cursor rather than resetting replay to zero.
+
+`tests/browser_background_sse_resume.py` covers hidden error, elapsed cleanup,
+newer server snapshot, replay cursor, subsequent activity and teardown. Run with
+`ERROR_ON_RETURN=1` for delayed error delivery. These use deterministic visibility
+and timer seams in Chromium/WebKit, not a physical iOS suspension test.
+
+## Repeated SSE disconnects during a long run
+
+Each successful current-transport `open` starts a fresh reconnect budget. A prior
+outage must not exhaust retries for the rest of the run; late errors from a
+replaced EventSource are ignored. `tests/browser_repeated_sse_reconnect.py` drives
+three disconnect/recovery cycles with subsequent tool events and stale-source
+errors in Chromium/WebKit. This tests browser recovery logic, not every mobile
+network or proxy failure.
 ## Browser becomes unresponsive while switching running conversations
 
 If `/health` is healthy and `active_runs` still contains the tasks, a frozen browser does not mean the backend workers have crashed. Reconnecting to a long reasoning stream can replay many chunks at once; repainting the activity scene for every chunk can block the browser main thread.
@@ -380,6 +498,20 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 **Fix.** Prefer WebUI's own password for installed PWAs. If you keep proxy basic auth, configure it so the same-origin service-worker and shell update fetches can complete. If the installed shell is already blank, clear site data for the Hermes origin, then reopen or reinstall the PWA after that site-scoped cleanup.
 
 **When to file a bug.** File a WebUI bug if the blank screen still reproduces without proxy basic auth, or after the proxy allows the same-origin service-worker and shell update fetches through.
+
+---
+
+## Installed PWA stops updating after reverse-proxy login expires
+
+**Symptom.** A long-open installed PWA still renders its cached conversation, but API actions or live updates stop after the identity-aware reverse proxy's browser session expires. Closing and reopening the PWA restores access.
+
+**Why.** Some identity-aware proxies treat background `fetch`/SSE failures differently from top-level navigation. Cloudflare Access, for example, can return a login redirect for an expired subrequest unless the AJAX request carries `X-Requested-With: XMLHttpRequest`; a standalone WebKit app cannot refresh the proxy's HttpOnly authorization cookie itself.
+
+**Diagnostic.** Confirm that a fresh top-level navigation reaches the proxy login/refresh flow while the stuck app's API requests fail after the configured proxy-session lifetime. For Cloudflare Access, inspect the application and policy session durations and verify that expired AJAX requests return `401` when they carry `X-Requested-With: XMLHttpRequest`.
+
+**Fix.** Current WebUI builds add that header to same-origin fetches. A `401` reloads the current deep link at the top level, allowing the proxy to silently reissue its application token while its global session is valid or to show the identity-provider login when required. Native browser `EventSource` does not expose a custom-header API, so SSE connections cannot carry this marker directly; their reconnect/status path and the focus, `pageshow`, and visible-page resume events run a deduplicated marked health probe that drives the same recovery without relying on background timers. Keep the service worker's navigation path network-first; do not expose or script-read the proxy's HttpOnly cookie.
+
+**When to file a bug.** File a WebUI bug if the page still requires a force-close after the proxy demonstrably returns `401` for the marked health/API request. Include the browser/PWA mode, sanitized response status and headers, configured session durations, and whether a normal top-level reload recovered the same deep link.
 
 ---
 

@@ -3234,9 +3234,13 @@ def get_providers() -> dict[str, Any]:
             _singular_model = str(cp.get("model") or "").strip()
             if _singular_model:
                 cp_model_ids.append(_singular_model)
-            for _mid in _configured_model_ids(cp.get("models")):
-                if _mid not in cp_model_ids:
-                    cp_model_ids.append(_mid)
+            # A discovery-enabled native record cannot fall back to a retired
+            # settings map when its live catalog is unavailable.
+            from api.config import _configured_live_provider_record
+            if _configured_live_provider_record(cp_id, cfg) is None:
+                for _mid in _configured_model_ids(cp.get("models")):
+                    if _mid not in cp_model_ids:
+                        cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
             cp_has_key = bool(_resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), cp_id))
             # Fallback: check credential pool (key added via hermes auth add)

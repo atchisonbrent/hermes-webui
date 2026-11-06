@@ -14,7 +14,7 @@ from api.helpers import (
     unreadable_content_length,
     unsupported_transfer_encoding,
 )
-from api.models import get_session
+from api.models import get_session, native_review_source
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
     safe_resolve_ws,
@@ -328,6 +328,8 @@ def handle_upload(handler):
         except _RejectBeforeRead as rejection:
             return _reject_before_read(handler, rejection.message, rejection.status)
         session_id = fields.get('session_id', '')
+        if native_review_source(session_id):
+            return j(handler, {'error': 'Native review sessions are read-only'}, status=403)
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
@@ -532,6 +534,8 @@ def handle_upload_extract(handler):
         except _RejectBeforeRead as rejection:
             return _reject_before_read(handler, rejection.message, rejection.status)
         session_id = fields.get('session_id', '')
+        if native_review_source(session_id):
+            return j(handler, {'error': 'Native review sessions are read-only'}, status=403)
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
@@ -776,6 +780,8 @@ def handle_workspace_upload(handler):
         except _RejectBeforeRead as rejection:
             return _reject_before_read(handler, rejection.message, rejection.status)
         session_id = fields.get('session_id', '')
+        if native_review_source(session_id):
+            return j(handler, {'error': 'Native review sessions are read-only'}, status=403)
         subpath = fields.get('path', '')
 
         if not session_id:
