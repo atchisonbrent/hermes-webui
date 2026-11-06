@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import pytest
 
 import api.models as models
 import api.profiles as profiles
@@ -9,6 +10,16 @@ import api.profiles as profiles
 
 def _set_active_streams(monkeypatch, ids):
     monkeypatch.setattr(models, "_active_stream_ids", lambda: set(ids))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_stream_state(monkeypatch):
+    # Other test modules may leave asynchronous registry cleanup in flight.
+    # These cache scenarios own their stream set; the streaming test overrides it.
+    _set_active_streams(monkeypatch, set())
+    # Production's 250ms timeout leaves only 50ms beyond these tests' 200ms
+    # observation window. Give scheduling headroom; the timeout case overrides it.
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_WAIT_SECONDS", 2.0)
 
 
 def test_cli_cache_key_stays_frozen_during_streaming(monkeypatch, tmp_path):
@@ -57,7 +68,7 @@ def test_get_cli_sessions_follower_reuses_stale_rows_during_slow_rebuild(monkeyp
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
-    (_, _, _, cache_key) = models._resolve_cli_sessions_context(None)
+    cache_key = models._cli_sessions_current_cache_key(all_profiles=False)
     cache_stamp = models._cli_sessions_cache_invalidation_stamp()
     with models._CLI_SESSIONS_CACHE_LOCK:
         models._CLI_SESSIONS_CACHE[cache_key] = (
@@ -227,7 +238,7 @@ def test_get_cli_sessions_clear_during_rebuild_does_not_restore_stale_rows(monke
 
     monkeypatch.setattr(models, "_load_cli_sessions_uncached", _blocking_loader)
 
-    _, _, _, cache_key = models._resolve_cli_sessions_context(None)
+    cache_key = models._cli_sessions_current_cache_key(all_profiles=False)
 
     owner = threading.Thread(
         target=lambda: results.setdefault("owner", models.get_cli_sessions()),
@@ -332,7 +343,7 @@ def test_get_cli_sessions_clear_during_rebuild_reclaims_after_invalidated_wait(m
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS", 0.2, raising=False)
 
-    (_, _, _, cache_key) = models._resolve_cli_sessions_context(None)
+    cache_key = models._cli_sessions_current_cache_key(all_profiles=False)
     cache_stamp = models._cli_sessions_cache_invalidation_stamp()
     with models._CLI_SESSIONS_CACHE_LOCK:
         models._CLI_SESSIONS_CACHE[cache_key] = (
@@ -396,7 +407,7 @@ def test_cache_cli_sessions_if_current_skips_stale_store(monkeypatch, tmp_path):
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
 
-    _, _, _, cache_key = models._resolve_cli_sessions_context(None)
+    cache_key = models._cli_sessions_current_cache_key(all_profiles=False)
     invalidation_stamp = models._cli_sessions_cache_invalidation_stamp()
 
     models.clear_cli_sessions_cache()

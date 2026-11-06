@@ -136,6 +136,7 @@ def _write_config(tmp_path, monkeypatch, text: str) -> None:
     cfgfile = tmp_path / "config.yaml"
     cfgfile.write_text(text, encoding="utf-8")
     monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_active_isolated_config_path", lambda: cfgfile)
     config.reload_config()
     config.invalidate_models_cache()
 

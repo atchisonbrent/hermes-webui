@@ -11,18 +11,20 @@ def test_no_worklog_skips_second_render_but_transparent_activity_keeps_fallback(
     source = (ROOT / 'static/ui.js').read_text()
     fn = _extract_function(source, '_collapseJustSettledWorklogInPlace')
     worthy = _extract_function(source, '_anchorSceneSceneHasWorklogWorthyRows')
+    redundant = _extract_function(source, '_transparentSettledTurnSecondRenderIsRedundant')
     script = """
 const assert=require('node:assert/strict');
 const inner={querySelectorAll:()=>[]};
 const $=()=>inner;
-const S={messages:[{role:'assistant',content:'Download the EPUB'}]};
-""" + worthy + fn + """
+const isTransparentStream=()=>true;
+const S={messages:[{role:'assistant',_anchor_stream_id:'run-1',content:'Download the EPUB'}]};
+""" + worthy + redundant + fn + """
 assert.equal(_collapseJustSettledWorklogInPlace('run-1'),true);
 assert.equal(_collapseJustSettledWorklogInPlace(''),false);
 const scene={stream_id:'run-1',activity_rows:[{role:'tool',tool:{name:'read_file'}}]};
-S.messages.push({role:'assistant',_anchor_activity_scene:scene});
+S.messages.push({role:'assistant',_anchor_stream_id:'run-1',_anchor_activity_scene:scene});
 assert.equal(_collapseJustSettledWorklogInPlace('run-1'),false);
-assert.equal(_collapseJustSettledWorklogInPlace('run-2'),true);
+assert.equal(_collapseJustSettledWorklogInPlace('run-2'),false); // Unknown owner: keep the fail-closed rebuild.
 scene.stream_id='';scene.identity={stream_id:'run-1'};
 assert.equal(_collapseJustSettledWorklogInPlace('run-1'),false);
 S.messages[1]._anchor_stream_id='run-2';

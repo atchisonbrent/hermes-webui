@@ -129,11 +129,11 @@ def test_write_excludes_other_profile_reload_until_commit(
     original_save = routes._save_yaml_config_file
     locked_at_commit = []
 
-    def paused_save(path, data):
+    def paused_save(path, data, **kwargs):
         locked_at_commit.append(config._cfg_lock.locked())
         entered.set()
         assert release.wait(5)
-        return original_save(path, data)
+        return original_save(path, data, **kwargs)
 
     monkeypatch.setattr(routes, "_save_yaml_config_file", paused_save)
 

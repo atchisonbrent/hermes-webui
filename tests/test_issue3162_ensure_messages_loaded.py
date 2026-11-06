@@ -8,6 +8,7 @@ mobile message (v0.51.161-166). Fix: `const` -> `let`.
 This is the targeted pin; tests/test_static_js_runtime_lint.py is the general guard.
 """
 from pathlib import Path
+import re
 
 REPO = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
@@ -38,11 +39,11 @@ def _ensure_messages_loaded_body() -> str:
 
 def test_ensure_messages_loaded_declares_msgs_with_let():
     body = _ensure_messages_loaded_body()
-    assert "let msgs = (data.session.messages" in body, (
+    assert re.search(r"\blet\s+msgs\s*=", body), (
         "_ensureMessagesLoaded must declare `let msgs` — it is reassigned by the #3018 "
         "carry-forward, and `const` throws a runtime TypeError on every mobile message (#3162)"
     )
-    assert "const msgs = (data.session.messages" not in body, (
+    assert not re.search(r"\bconst\s+msgs\s*=", body), (
         "found `const msgs` in _ensureMessagesLoaded — this is the #3162 brick-class bug; "
         "must be `let` because msgs is reassigned"
     )

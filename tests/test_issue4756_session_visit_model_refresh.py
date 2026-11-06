@@ -376,23 +376,35 @@ def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebu
             second_load_gate.wait(timeout=5)
         return stale_catalog
 
+    release_rebuild = threading.Event()
+    rebuilt = threading.Event()
+
     def _invoke_models_rebuild(_builder):
         nonlocal rebuild_count
         with rebuild_lock:
             rebuild_count += 1
-        time.sleep(0.05)
+        assert release_rebuild.wait(timeout=10)
         return rebuilt_catalog
+
+    def _saved_rebuild(_cache, **_kwargs):
+        rebuilt.set()
+
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", _saved_rebuild)
 
     monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", _load_stale_models_cache_from_disk)
     monkeypatch.setattr(cfg, "_invoke_models_rebuild", _invoke_models_rebuild)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(cfg.get_available_models_for_session_visit) for _ in range(2)]
-        results = [future.result(timeout=10) for future in futures]
-
-    assert all(result == stale_catalog for result in results)
-    assert rebuild_count == 1
-    time.sleep(0.1)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(cfg.get_available_models_for_session_visit) for _ in range(2)]
+            results = [future.result(timeout=10) for future in futures]
+        assert all(result == stale_catalog for result in results)
+        assert rebuild_count == 1
+    finally:
+        release_rebuild.set()
+        assert rebuilt.wait(timeout=5)
+        with cfg._cache_build_cv:
+            assert cfg._cache_build_cv.wait_for(lambda: not cfg._cache_build_in_progress, timeout=5)
     assert cfg._available_models_cache == rebuilt_catalog
     assert cfg._cache_build_in_progress is False
 

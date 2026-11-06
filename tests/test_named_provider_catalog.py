@@ -1,39 +1,163 @@
 """Named provider branding is presentation, never a routing migration."""
 
-from tests.test_issue7404_models_discovered_not_allowlist import _provider_group, _setup_provider
+from tests.test_issue7404_models_discovered_not_allowlist import (
+    _provider_group,
+    _setup_provider as _setup_upstream_provider,
+)
+
+
+def _setup_provider(monkeypatch, tmp_path, provider_cfg, live_ids):
+    config, urllib_requests = _setup_upstream_provider(
+        monkeypatch, tmp_path, provider_cfg, live_ids,
+    )
+    import hermes_cli.models as models
+
+    def owned_catalog_fetch(_key, _url, **_kwargs):
+        return list(live_ids)
+
+    # The selected authority's transport is synthetic here. Do not delegate
+    # native records to their configured public URLs during this unit suite.
+    monkeypatch.setattr(models, "cached_fetch_api_models", owned_catalog_fetch)
+    return config, urllib_requests
+
+
+def test_discoverable_native_catalog_is_authoritative(monkeypatch, tmp_path):
+    config, urllib_requests = _setup_provider(monkeypatch, tmp_path, {
+        "name": "Cloud Models", "base_url": "https://cloud.example/v1",
+        "key_env": "CATALOG_TEST_KEY", "discover_models": True,
+        "models_discovered": True,
+        "models": {"retired-model": {}},
+        "extra_headers": {"X-Project": "project-a"},
+        "api_mode": "chat_completions",
+    }, [])
+    monkeypatch.setenv("CATALOG_TEST_KEY", "test-only-key")
+    config.cfg["model"]["default"] = "live-model-a"
+    import hermes_cli.models as models
+    calls = []
+
+    def fetch(_key, url, **kwargs):
+        calls.append({"url": url, "headers": kwargs.get("headers"), "api_mode": kwargs.get("api_mode")})
+        return ["live-model-a", "live-model-b"]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("native authority must not use a different discovery path")
+
+    monkeypatch.setattr(models, "cached_fetch_api_models", fetch)
+    monkeypatch.setattr(models, "provider_model_ids", forbidden)
+    group = _provider_group(config.get_available_models(force_refresh=True), "custom:custom-llm")
+    assert [m["id"] for m in group["models"]] == ["live-model-a", "live-model-b"]
+    assert calls == [{
+        "url": "https://cloud.example/v1",
+        "headers": {"X-Project": "project-a"},
+        "api_mode": "chat_completions",
+    }]
+    from urllib.parse import urlparse
+
+    # The shared fixture also records unrelated built-in Copilot/token reads.
+    # The catalog contract concerns the selected provider's legacy endpoint.
+    assert not any(
+        urlparse(url).hostname == "cloud.example" for url in urllib_requests
+    )
+
+
+def test_budget_cut_authority_catalog_is_not_published_as_empty(monkeypatch, tmp_path):
+    import threading
+    import hermes_cli.models as models
+
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
+        "name": "Cloud Models", "base_url": "https://cloud.example/v1",
+        "key_env": "CATALOG_TEST_KEY", "discover_models": True,
+        "models_discovered": True, "models": {},
+    }, [])
+    monkeypatch.setenv("CATALOG_TEST_KEY", "test-only-key")
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 5.0)
+    config.cfg["model"]["default"] = "fresh-model"
+    retry_started = threading.Event()
+    release_retry = threading.Event()
+    published = threading.Event()
+    attempts = []
+    publications = []
+    original_publish = config._save_models_cache_to_disk
+
+    def fetch(_key, _url, **kwargs):
+        if kwargs.get("cache_only"):
+            return None
+        attempts.append(kwargs["timeout"])
+        if len(attempts) == 1:
+            return None  # Agent reports an unavailable budget-sliced attempt.
+        retry_started.set()
+        assert release_retry.wait(5)
+        return ["fresh-model"]
+
+    def publish(payload, **kwargs):
+        publications.append(payload)
+        result = original_publish(payload, **kwargs)
+        published.set()
+        return result
+
+    monkeypatch.setattr(models, "cached_fetch_api_models", fetch)
+    monkeypatch.setattr(config._CustomProbeSchedule, "next_timeout", lambda _self:
+                        0.01 if not attempts else config.CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS)
+    monkeypatch.setattr(config, "_save_models_cache_to_disk", publish)
+    try:
+        config.get_available_models(force_refresh=True)
+        assert retry_started.wait(2), "budget-truncated authority was never retried"
+        assert not publications, "partial empty authority entered the long-lived cache"
+        assert not (tmp_path / "models_cache.json").exists()
+    finally:
+        release_retry.set()
+    assert published.wait(5)
+    assert len(attempts) == 2
+    assert attempts == [0.01, config.CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS]
+    group = _provider_group(publications[-1], "custom:custom-llm")
+    assert [m["id"] for m in group["models"]] == ["fresh-model"]
 
 
 def test_configured_display_name_does_not_change_route(monkeypatch, tmp_path):
-    config = _setup_provider(monkeypatch, tmp_path, {
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
         "name": "Cloud Models", "base_url": "https://cloud.example/v1",
         "discover_models": False, "models": {"model-a": {}},
     }, [])
-    group = _provider_group(config.get_available_models(force_refresh=True), "custom-llm")
+    group = _provider_group(config.get_available_models(force_refresh=True), "custom:custom-llm")
     assert group["provider"] == "Cloud Models"
     assert [m["id"] for m in group["models"]] == ["model-a"]
 
 
 def test_blank_display_name_keeps_the_default_label(monkeypatch, tmp_path):
-    config = _setup_provider(monkeypatch, tmp_path, {
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
         "name": "   ", "base_url": "https://cloud.example/v1",
         "discover_models": False, "models": {"model-a": {}},
     }, [])
-    group = _provider_group(config.get_available_models(force_refresh=True), "custom-llm")
+    group = _provider_group(config.get_available_models(force_refresh=True), "custom:custom-llm")
     assert group["provider"] == "Custom Llm"
 
 
 def test_cross_provider_slash_selection_keeps_route(monkeypatch, tmp_path):
-    config = _setup_provider(monkeypatch, tmp_path, {
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
         "name": "Cloud Models", "base_url": "https://cloud.example/v1",
         "key_env": "CATALOG_TEST_KEY", "discover_models": True,
         "models_discovered": True, "models": {},
     }, ["vendor/new-model"])
     monkeypatch.setenv("CATALOG_TEST_KEY", "test-only-key")
     config.cfg["model"] = {"provider": "anthropic", "default": "claude-test"}
-    group = _provider_group(config.get_available_models(force_refresh=True), "custom-llm")
+    group = _provider_group(config.get_available_models(force_refresh=True), "custom:custom-llm")
     selected = group["models"][0]["id"]
-    assert selected == "@custom-llm:vendor/new-model"
+    assert selected == "@custom:custom-llm:vendor/new-model"
     model, provider, endpoint = config.resolve_model_provider(selected)
+    assert model == "vendor/new-model"
+    assert provider in {"custom-llm", "custom:custom-llm"}
+    assert endpoint == "https://cloud.example/v1"
+
+
+def test_legacy_prefix_preserves_api_url_alias(monkeypatch, tmp_path):
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
+        "name": "Cloud Models", "api": "https://cloud.example/v1",
+        "discover_models": True, "models_discovered": True,
+    }, [])
+    config.cfg["model"] = {"provider": "anthropic", "default": "claude-test"}
+    model, provider, endpoint = config.resolve_model_provider(
+        "@custom-llm:vendor/new-model",
+    )
     assert model == "vendor/new-model"
     assert provider in {"custom-llm", "custom:custom-llm"}
     assert endpoint == "https://cloud.example/v1"
@@ -68,7 +192,18 @@ def test_named_live_catalog_uses_owned_connection(monkeypatch):
         }}})
         assert config._read_live_provider_model_ids("named") == ["fresh-model", "other-model"]
     monkeypatch.setattr(models, "cached_fetch_api_models", lambda *a, **kw: None)
-    assert config._read_live_provider_model_ids("named") == []  # never try another authority
+    status = {}
+    assert config._read_live_provider_model_ids("named", probe_status=status) == []
+    assert status == {"unavailable": True}  # never try another authority
+    monkeypatch.setattr(models, "cached_fetch_api_models", lambda *a, **kw: [])
+    status = {}
+    assert config._read_live_provider_model_ids("named", probe_status=status) == []
+    assert status == {}  # an actual empty catalog is authoritative, not truncated
+    monkeypatch.setattr(models, "cached_fetch_api_models", lambda *a, **kw:
+                        ["cached-model"] if kw.get("cache_only") else None)
+    status = {}
+    assert config._read_live_provider_model_ids("named", probe_status=status) == ["cached-model"]
+    assert status == {}  # Agent's scoped cache recovered the live miss
 
 
 def test_catalog_effort_ladder_is_not_reasoning_boolean(monkeypatch):
@@ -142,7 +277,7 @@ def test_configured_catalog_failure_never_invents_inventory(monkeypatch, tmp_pat
     import api.config as module
     import hermes_cli.models as models
     reader = module._read_live_provider_model_ids
-    config = _setup_provider(monkeypatch, tmp_path, {
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
         "name": "Cloud Models", "base_url": "https://cloud.example/v1",
         "key_env": "CATALOG_TEST_KEY", "discover_models": True,
         "models_discovered": True, "models": {"retired-settings-model": {}},
@@ -194,7 +329,7 @@ def test_ambiguous_catalog_does_not_break_other_providers(monkeypatch, tmp_path)
     import hermes_cli.models as models
 
     reader = module._read_live_provider_model_ids
-    config = _setup_provider(monkeypatch, tmp_path, {
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
         "base_url": "https://healthy.example/v1", "discover_models": True,
         "models_discovered": True,
     }, [])
@@ -208,7 +343,7 @@ def test_ambiguous_catalog_does_not_break_other_providers(monkeypatch, tmp_path)
         AssertionError("ambiguous route must not fall through")))
     assert reader("named") == []
     payload = config.get_available_models(force_refresh=True)
-    group = _provider_group(payload, "custom-llm")
+    group = _provider_group(payload, "custom:custom-llm")
     assert "healthy-model" in {m["id"] for m in group["models"]}
     assert not any("ambiguous-model" in m["id"] for g in payload["groups"] for m in g["models"])
 
@@ -216,7 +351,7 @@ def test_ambiguous_catalog_does_not_break_other_providers(monkeypatch, tmp_path)
 def test_over_budget_catalog_does_not_resurrect_settings(monkeypatch, tmp_path):
     import threading
 
-    config = _setup_provider(monkeypatch, tmp_path, {
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
         "name": "Cloud Models", "base_url": "https://cloud.example/v1",
         "discover_models": True, "models_discovered": True,
         "models": {"retired-settings-model": {}},
@@ -234,7 +369,7 @@ def test_over_budget_catalog_does_not_resurrect_settings(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "_read_live_provider_model_ids", slow_read)
     try:
         payload = config.get_available_models(force_refresh=True)
-        group = _provider_group(payload, "custom-llm")
+        group = _provider_group(payload, "custom:custom-llm")
         assert [m["id"] for m in group["models"]] == ["model-a"]
         assert group["provider"] == "Cloud Models"
     finally:
@@ -246,11 +381,11 @@ def test_over_budget_catalog_does_not_resurrect_settings(monkeypatch, tmp_path):
 
 
 def test_default_injection_uses_route_id_not_display_name(monkeypatch, tmp_path):
-    config = _setup_provider(monkeypatch, tmp_path, {
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
         "name": "Cloud Models", "base_url": "https://cloud.example/v1",
         "discover_models": True, "models_discovered": True,
     }, ["model-b"])
-    groups = [g for g in config.get_available_models(force_refresh=True)["groups"] if g["provider_id"] == "custom-llm"]
+    groups = [g for g in config.get_available_models(force_refresh=True)["groups"] if g["provider_id"] == "custom:custom-llm"]
     assert len(groups) == 1
     assert groups[0]["provider"] == "Cloud Models"
     assert [m["id"] for m in groups[0]["models"]] == ["model-a", "model-b"]
@@ -277,3 +412,107 @@ def test_live_route_refresh_and_failure_stay_on_configured_provider(monkeypatch)
     inventory.clear()
     routes._clear_live_models_cache()
     assert routes._handle_live_models(object(), parsed)["models"] == []
+
+
+def test_authority_fetch_uses_the_probe_schedule_timeout(monkeypatch, tmp_path):
+    import hermes_cli.models as models
+
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
+        "name": "Cloud Models", "base_url": "https://cloud.example/v1",
+        "key_env": "CATALOG_TEST_KEY", "discover_models": True,
+        "models_discovered": True, "models": {},
+    }, [])
+    monkeypatch.setenv("CATALOG_TEST_KEY", "test-only-key")
+    calls = []
+
+    def fetch(_key, _url, **kwargs):
+        calls.append(kwargs)
+        return ["live-model-a"]
+
+    monkeypatch.setattr(config._CustomProbeSchedule, "next_timeout", lambda _self: 0.123)
+    monkeypatch.setattr(models, "cached_fetch_api_models", fetch)
+    group = _provider_group(config.get_available_models(force_refresh=True), "custom:custom-llm")
+    assert {model["id"] for model in group["models"]} == {"model-a", "live-model-a"}
+    assert calls and calls[-1]["timeout"] == 0.123
+    assert calls[-1]["api_mode"] is None
+
+
+def test_failed_authority_keeps_default_and_reports_error(monkeypatch, tmp_path):
+    import hermes_cli.models as models
+
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
+        "name": "Cloud Models", "base_url": "https://cloud.example/v1",
+        "key_env": "CATALOG_TEST_KEY", "model": "model-a",
+        "discover_models": True, "models_discovered": True,
+        "models": {"retired-settings-model": {}},
+    }, [])
+    monkeypatch.setenv("CATALOG_TEST_KEY", "test-only-key")
+    for response in [None, []]:
+        monkeypatch.setattr(models, "cached_fetch_api_models", lambda *a, **kw: response)
+        config.invalidate_models_cache()
+        group = _provider_group(config.get_available_models(force_refresh=True), "custom:custom-llm")
+        assert [model["id"] for model in group["models"]] == ["model-a"]
+        assert group["models_endpoint_error"]["kind"] == "network"
+        assert "retired-settings-model" not in {
+            model["id"] for model in group.get("models", []) + group.get("extra_models", [])
+        }
+
+
+def test_budget_fallback_also_survives_completed_publication(monkeypatch, tmp_path):
+    import threading
+    import hermes_cli.models as models
+
+    config, _ = _setup_provider(monkeypatch, tmp_path, {
+        "name": "Cloud Models", "base_url": "https://cloud.example/v1",
+        "key_env": "CATALOG_TEST_KEY", "discover_models": True,
+        "models_discovered": True, "models": {"retired-settings-model": {}},
+    }, [])
+    monkeypatch.setenv("CATALOG_TEST_KEY", "test-only-key")
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.01)
+    monkeypatch.setattr(models, "cached_fetch_api_models", lambda *a, **kw: [])
+    original = config._read_live_provider_model_ids
+    release = threading.Event()
+    workers = []
+
+    def slow_read(provider, **kwargs):
+        workers.append(threading.current_thread())
+        assert release.wait(5)
+        return original(provider, **kwargs)
+
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", slow_read)
+    try:
+        group = _provider_group(config.get_available_models(force_refresh=True), "custom:custom-llm")
+        assert [model["id"] for model in group["models"]] == ["model-a"]
+        assert group["provider"] == "Cloud Models"
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(5)
+            assert not worker.is_alive()
+    assert workers, "the real rebuild worker must execute"
+    config.invalidate_models_cache()
+    group = _provider_group(config.get_available_models(force_refresh=True), "custom:custom-llm")
+    assert [model["id"] for model in group["models"]] == ["model-a"]
+    assert "retired-settings-model" not in {
+        model["id"] for model in group.get("models", []) + group.get("extra_models", [])
+    }
+def test_discovery_enabled_provider_card_does_not_reuse_retired_models(monkeypatch):
+    import api.providers as providers
+
+    cfg = {
+        "model": {"default": "model-a", "provider": "custom-llm"},
+        "providers": {"custom-llm": {
+            "name": "   ", "base_url": "https://cloud.example/v1",
+            "model": "model-a", "models": {"retired-settings-model": {}},
+            "discover_models": True, "models_discovered": True,
+        }},
+    }
+    monkeypatch.setattr(providers, "get_config", lambda: cfg)
+    card = next(row for row in providers.get_providers()["providers"] if row["id"] == "custom:custom-llm")
+    assert card["display_name"] == "Custom Llm"
+    assert [model["id"] for model in card["models"]] == ["model-a"]
+
+    cfg["providers"]["custom-llm"]["discover_models"] = False
+    cfg["providers"]["custom-llm"].pop("models_discovered", None)
+    allowlisted = next(row for row in providers.get_providers()["providers"] if row["id"] == "custom:custom-llm")
+    assert "retired-settings-model" in {model["id"] for model in allowlisted["models"]}

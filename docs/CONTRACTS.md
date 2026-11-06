@@ -60,6 +60,11 @@ corrected. A model/provider change clears the old observation until a new run
 reports its trigger. This supersedes the earlier display-only threshold rescaling
 rule; the change does not modify the agent's compression policy or model capacity.
 
+- [`docs/architecture/model-picker-routing.md`](architecture/model-picker-routing.md):
+  current contract for provider-scoped model identity, exact OpenRouter route
+  matching, overflow promotion, routed fallback, and selected-row rendering.
+  Start here before changing model-picker deduplication, restoration, or live
+  catalog merging.
 - [`docs/remote-workspaces.md`](remote-workspaces.md):
   architecture contract for remote terminal workspaces (SSH/Docker), target-side
   POSIX path preservation against macOS synthetic firmlink expansion, and
@@ -159,6 +164,15 @@ rule; the change does not modify the agent's compression policy or model capacit
   retarget or transient resolve fallback is always observed on the next call.
   Start here before widening this cache's scope or adding a similar
   call-scoped cache elsewhere (#7636).
+- [`docs/architecture/session-archive-cross-profile.md`](architecture/session-archive-cross-profile.md):
+  current contract for `POST /api/session/archive`: the request fields
+  (`all_profiles` plus the required validated `profile` owner claim), the rule
+  that the route owns its own profile boundary because it is exempt from the
+  generic request-session guard (so an archived foreign session stays
+  restorable), the invariant that a refused archive never mutates the sidecar,
+  the profile-limit matrix, and the 400/403/404/409 failure responses.
+  Start here before changing the archive handler, the all-profiles archive
+  path, or session profile-visibility rules (#7549, #7731).
 - [`docs/architecture/session-channel-lifecycle.md`](architecture/session-channel-lifecycle.md):
   current contract for the per-session SSE channel and the per-turn stream lifecycle: the state
   layers and their authoritative writers, the writer-side subscriber-liveness signal plus the
@@ -300,6 +314,9 @@ does not match the touched subsystem.
   failures.
 - [`docs/EXTENSIONS.md`](EXTENSIONS.md): administrator-controlled WebUI
   extension injection.
+- [`docs/scripts-panel.md`](scripts-panel.md): the Tasks panel's Scripts
+  subtab — the active profile's `~/.hermes/scripts/` directory, the
+  read-only endpoints, and the containment rules.
 
 ## Quick redline checklist
 

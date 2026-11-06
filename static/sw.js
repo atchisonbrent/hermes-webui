@@ -26,6 +26,7 @@ const SHELL_ASSETS = [
   './static/pwa-startup.js?v=__WEBUI_VERSION__',
   './static/boot.js?v=__WEBUI_VERSION__',
   './static/assistant_turn_anchors.js?v=__WEBUI_VERSION__',
+  './static/a11y-helpers.js?v=__WEBUI_VERSION__',
   './static/ui.js?v=__WEBUI_VERSION__',
   './static/messages.js?v=__WEBUI_VERSION__',
   './static/sessions.js?v=__WEBUI_VERSION__',

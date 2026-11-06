@@ -34,7 +34,11 @@ def _brace_body_after(src: str, marker: str) -> str:
 
 
 def _event_body(event_name: str) -> str:
-    return _brace_body_after(MESSAGES_JS, f"source.addEventListener('{event_name}'")
+    body = _brace_body_after(MESSAGES_JS, f"source.addEventListener('{event_name}'")
+    if event_name == "error":
+        assert "await _retryStreamAfterError(source);" in body
+        body += _function_body("_retryStreamAfterError")
+    return body
 
 
 def _function_body(name: str) -> str:
@@ -200,8 +204,10 @@ def test_attach_live_stream_registers_one_source_per_session_stream():
     error_body = _event_body("error")
 
     assert "const LIVE_STREAMS={};" in MESSAGES_JS
-    assert "LIVE_STREAMS[activeSid]={streamId,source};" in wire_body
+    assert "LIVE_STREAMS[activeSid]={streamId,source," in "".join(wire_body.split())
+    assert "dispose:" in wire_body
     assert "existingLive.source.close();" in wire_body
     assert "if(source&&live.source!==source) return;" in close_body
     assert "existingLive&&existingLive.streamId===streamId" in attach_body
-    assert "_closeSource(source);" in error_body
+    # Retain ownership while closing this transport so hidden-page recovery can resume.
+    assert "source.close();" in error_body

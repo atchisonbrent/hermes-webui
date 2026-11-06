@@ -323,10 +323,10 @@ class TestToolCallGroupingStatic:
         assert ".thinking-card-body pre" not in thinking_body and "textContent" not in thinking_body, (
             "Thinking-card disclosure keys must not depend on streaming body text."
         )
-        assert "_thinkingActivityNode(clean, false, thinkingKey)" in append_thinking_fn, (
+        assert "_thinkingActivityNode(clean, false, thinkingKey, true)" in append_thinking_fn, (
             "Live streaming Thinking rows must stamp the stable thinking key at creation time."
         )
-        assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in append_step_fn, (
+        assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey, !!(opts&&opts.live))" in append_step_fn, (
             "Settled Worklog Thinking rows must stamp the stable thinking key at creation time."
         )
         assert "thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:''" in _function_body(UI_JS, "renderMessages"), (
@@ -544,9 +544,13 @@ class TestToolCallGroupingStatic:
         ) == reasoning, (
             "Non-exact reasoning should stay available as a Worklog Thinking Card."
         )
-        helper = _function_body(UI_JS, "_stripVisibleAssistantEchoFromThinking")
-        assert ".split(snippet).join('')" not in helper
-        assert ".includes(" not in helper
+        for helper_name in (
+            "_stripVisibleAssistantEchoFromThinking",
+            "_stripVisibleAssistantEchoFromThinkingCached",
+        ):
+            helper = _function_body(UI_JS, helper_name)
+            assert ".split(snippet).join('')" not in helper, helper_name
+            assert ".includes(" not in helper, helper_name
 
     def test_reasoning_first_interim_later_does_not_duplicate_settled_worklog(self):
         render_fn = _function_body(UI_JS, "renderMessages")
@@ -560,7 +564,7 @@ class TestToolCallGroupingStatic:
             "settlement must still compare against earlier visible process prose "
             "from the same assistant turn."
         )
-        assert "_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents)" in render_fn
+        assert "_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents, thinkingEchoCache)" in render_fn
         assert "_stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts)" in helper
         assert _run_thinking_echo_helper(
             "I am checking the 3401 review blocker.",
@@ -600,7 +604,7 @@ class TestToolCallGroupingStatic:
             "Thinking should be an explicit Worklog item, independent from Tool Cards."
         )
         render_min = re.sub(r"\s+", "", render_fn)
-        assert "thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:''" in render_min, (
+        assert "thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompareCached(thinkingText,thinkingEchoCache)}`:''" in render_min, (
             "Settled Worklog should keep normalized-content Thinking dedupe so sibling messages do not duplicate cards."
         )
         assert "thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:''" in render_min, (
@@ -624,7 +628,7 @@ class TestToolCallGroupingStatic:
         assert "_worklogReasonNodeFromText(thinkingText" not in live_thinking_fn, (
             "Provider reasoning should not render as live Worklog process prose."
         )
-        assert "_thinkingActivityNode(clean, false, thinkingKey)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
+        assert "_thinkingActivityNode(clean, false, thinkingKey, true)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
             "Live provider thinking should render as a collapsed Worklog Thinking Card."
         )
         assert "ensureLiveWorklogContainer" in live_thinking_fn, (
@@ -686,27 +690,32 @@ class TestToolCallGroupingStatic:
         reasoning_fn = reasoning_match.group(1)
         render_live_thinking_fn = _function_body(MESSAGES_JS, "_renderLiveThinking")
 
-        assert reasoning_fn.count("_liveThinkingText()") == 1, (
-            "_liveThinkingText() should be computed once inside the active-session branch."
+        # #8171: the listener coalesces; one renderer path runs per frame.
+        assert "_upsertAnchorReasoning(" not in reasoning_fn and "_updateLiveThinkingCard(" not in reasoning_fn, (
+            "Reasoning SSE updates must not render per event; they schedule the coalesced render."
         )
-        assert "const liveThinkingText=_liveThinkingText();" in reasoning_fn, (
-            "Reasoning SSE updates should cache the live thinking text before routing."
+        assert "_reasoningRenderPending=true;" in reasoning_fn and "_scheduleRender();" in reasoning_fn, (
+            "Reasoning SSE updates should mark a pending render and schedule one frame."
         )
-        primary_call = "_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)"
-        assert primary_call in reasoning_fn, (
+        flush_fn = _function_body(MESSAGES_JS, "_flushPendingReasoningRender")
+        assert flush_fn.count("liveReasoningText") == 1, (
+            "The live thinking text should be computed once per coalesced render."
+        )
+        primary_call = "_upsertAnchorReasoning(text, opts)"
+        assert primary_call in flush_fn, (
             "Anchor reasoning must remain the primary renderer path."
         )
-        fallback_call = "_updateLiveThinkingCard(liveThinkingText,{"
-        assert reasoning_fn.index(primary_call) < reasoning_fn.index(fallback_call), (
+        fallback_call = "_updateLiveThinkingCard(text,{"
+        assert flush_fn.index(primary_call) < flush_fn.index(fallback_call), (
             "The legacy thinking card should only run after anchor upsert fails."
         )
-        assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){" in reasoning_fn, (
+        assert "if(!_upsertAnchorReasoning(text, opts)&&!opts.deferRender){" in flush_fn, (
             "The legacy thinking card should be a falsy-anchor fallback."
         )
-        assert reasoning_fn.count(fallback_call) == 1, (
-            "Reasoning SSE updates should call the live thinking card only in fallback."
+        assert flush_fn.count(fallback_call) == 1, (
+            "The coalesced render should call the live thinking card only in fallback."
         )
-        assert "...anchorReasoningFallback" in reasoning_fn, (
+        assert "...opts" in flush_fn, (
             "The fallback renderer must receive the exact Anchor reasoning identity."
         )
         assert "_updateLiveThinkingCard(" in render_live_thinking_fn, (
@@ -833,7 +842,15 @@ class TestToolCardDesignTokens:
         assert ".tool-worklog-tool-group-body .tool-card-icon," in CSS
         assert ".tool-group-body .tool-card-icon{display:none;}" in CSS
         assert ".tool-worklog-tool-group-body .tool-card-header," in CSS
-        assert ".tool-group-body .tool-card-header{margin-left:0;padding-left:0;}" in CSS
+        # #7495 UX gate: 5px (not 0) — the running-dot ring scales to 2.4x of
+        # the 7px dot (~4.9px left overflow), so a zero left padding let the
+        # card's overflow:hidden clip the ring straight in Compact Worklog.
+        # The reserve covers EVERY compact worklog card header (the standalone
+        # live running card included), so running and completed rows share one
+        # left inset and the completed→grouped move does not shift the row.
+        assert (".tool-worklog-list .tool-card-header,\n"
+                ".tool-worklog-tool-group-body .tool-card-header,\n"
+                ".tool-group-body .tool-card-header{margin-left:0;padding-left:5px;}") in CSS
         assert ".tool-worklog-tool-group-body .tool-card-detail," in CSS
         assert ".tool-group-body .tool-card-detail{width:100%;max-width:100%;box-sizing:border-box;}" in CSS
 

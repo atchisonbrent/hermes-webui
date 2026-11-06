@@ -13,7 +13,7 @@ def run_node(names, body):
 
 
 def test_projection_changes_invalidate_cached_history():
-    result=run_node(['_messageRenderCacheSignature','_addBoundedHash','_hashObjectInto','msgContent','_messageHasReasoningPayload'], '''
+    result=run_node(['_messageRenderCacheSignature','_addMessageRenderHash','_addBoundedHash','_hashObjectInto','msgContent','_messageHasReasoningPayload'], '''
         const S={messages:[{role:'assistant',content:'Done.'}],toolCalls:[]};
         const base=_messageRenderCacheSignature();
         S.messages[0].display_commentary=['Checking.'];

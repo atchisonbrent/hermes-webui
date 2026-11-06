@@ -673,7 +673,7 @@ def test_scene_renderer_allows_prose_tool_prose_tool_interleaving():
 
     assert "currentTools=null;" in render
     assert render.index("if(row.role==='tool')") < render.index("}else{")
-    assert render.index("currentTools=null;") < render.index("list.appendChild(node);")
+    assert render.index("currentTools=null;") < render.index("children.push(node);")
 
 
 def test_anchor_tool_preview_slot_stays_empty_for_result_text():
@@ -1435,7 +1435,10 @@ global._syncToolCallGroupSummary=()=>{{}};
     eval(extractFunc('_refreshTransparentThinkingLiveRow'));
     eval(extractFunc('_refreshTransparentLiveRow'));
     document.documentElement = document.documentElement || Object.create(null);
+eval(extractFunc('_worklogDetailsExpandedDefault'));
 eval(extractFunc('_anchorSceneRetainedRowSignature'));
+eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_syncTransparentEventTimestampVisibility'));
 eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 

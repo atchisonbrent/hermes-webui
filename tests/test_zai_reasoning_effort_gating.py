@@ -426,6 +426,7 @@ def test_set_reasoning_effort_accepts_empty_as_clear():
         saved.update(data.get("agent", {}) or {})
 
     with mock.patch("api.config._save_yaml_config_file", side_effect=fake_save), \
+         mock.patch("api.config._load_yaml_config_file_raw", return_value={}), \
          mock.patch("api.config.reload_config"):
         result = cfg.set_reasoning_effort("", model_id="glm-4.6", provider_id="zai")
     # Empty effort must not write either a global or per-model empty string.
@@ -455,6 +456,7 @@ def test_set_reasoning_effort_still_accepts_valid_levels(effort):
         saved.update(data.get("agent", {}) or {})
 
     with mock.patch("api.config._save_yaml_config_file", side_effect=fake_save), \
+         mock.patch("api.config._load_yaml_config_file_raw", return_value={}), \
          mock.patch("api.config.reload_config"):
         cfg.set_reasoning_effort(effort, model_id="glm-4.6", provider_id="zai")
     assert saved.get("reasoning_overrides", {}).get("glm-4.6") == effort

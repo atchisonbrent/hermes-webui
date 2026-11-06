@@ -16,6 +16,7 @@ const currentMsgs=[user,{role:'assistant',_live:true,content:'old'}];
 const olderMsgs=[{role:'user',content:'history'},{role:'assistant',content:'partial'}];
 const responseSession={};
 const S={toolCalls:[]};
+const carriedRecoveredRows=[];
 let nextMessages=[...olderMsgs,...currentMsgs];
 function _reconcileRunningMessageWindow(){return [olderMsgs[0],{...user},currentMsgs[1],{role:'assistant',_live:true,content:'new'}];}
 '''+source[start:end]+'''

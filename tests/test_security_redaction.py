@@ -504,14 +504,15 @@ def _create_session_with_credentials() -> str:
 
 
 def test_api_session_redacts_messages():
-    """GET /api/session route must call redact_session_data() before returning."""
+    """GET /api/session must use the public projection, which masks messages."""
     import inspect
     import api.routes as routes
     src = inspect.getsource(routes._handle_session_get)
-    # Verify redact_session_data is applied to the session payload
-    assert "redact_session_data" in src, (
-        "api/routes.py GET /api/session handler must call redact_session_data() on the response"
-    )
+    assert "public_session_projection" in src
+    payload = {"session_id": "abc123", "messages": [{"role": "assistant", "content": _FAKE_GITHUB_PAT}]}
+    projected = routes.public_session_projection(payload)
+    assert _FAKE_GITHUB_PAT not in projected["messages"][0]["content"]
+    assert payload["messages"][0]["content"] == _FAKE_GITHUB_PAT
 
 
 def test_api_session_redacts_title():

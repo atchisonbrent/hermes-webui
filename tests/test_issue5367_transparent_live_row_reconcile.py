@@ -321,9 +321,12 @@ eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 document.documentElement = document.documentElement || Object.create(null);
+eval(extractFunc('_worklogDetailsExpandedDefault'));
 eval(extractFunc('_anchorSceneRetainedRowSignature'));
+eval(extractFunc('_anchorSceneToolRenderSignature'));
 eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_liveSceneRowsWithUserInputs'));
+eval(extractFunc('_syncTransparentEventTimestampVisibility'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
 const firstScene = {{
@@ -1280,9 +1283,12 @@ eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 document.documentElement = document.documentElement || Object.create(null);
+eval(extractFunc('_worklogDetailsExpandedDefault'));
 eval(extractFunc('_anchorSceneRetainedRowSignature'));
+eval(extractFunc('_anchorSceneToolRenderSignature'));
 eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_liveSceneRowsWithUserInputs'));
+eval(extractFunc('_syncTransparentEventTimestampVisibility'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
 const firstScene = { version:'activity_scene_v1', activity_rows:[{ row_id:'row-tool', role:'tool', source_event_type:'tool_delta', toolName:'old_tool' }] };
@@ -1622,9 +1628,12 @@ eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 document.documentElement = document.documentElement || Object.create(null);
+eval(extractFunc('_worklogDetailsExpandedDefault'));
 eval(extractFunc('_anchorSceneRetainedRowSignature'));
+eval(extractFunc('_anchorSceneToolRenderSignature'));
 eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_liveSceneRowsWithUserInputs'));
+eval(extractFunc('_syncTransparentEventTimestampVisibility'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 global._copyEventToClipboard = (row) => {{
   const tc = row && row._tcData || {{}};

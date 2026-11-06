@@ -30,6 +30,7 @@ def test_providers_only_configured_flag_does_not_create_picker_group(monkeypatch
         raising=False,
     )
     monkeypatch.setattr(config, "_cfg_has_in_memory_overrides", lambda: True)
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path())
     monkeypatch.setattr(
         config,
         "_get_auth_store_path",
@@ -63,6 +64,7 @@ def test_unknown_scalar_provider_config_flags_are_ignored(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(config, "_cfg_has_in_memory_overrides", lambda: True)
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path())
     monkeypatch.setattr(
         config,
         "_get_auth_store_path",
