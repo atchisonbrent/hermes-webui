@@ -112,10 +112,25 @@ async function _savedSessionShouldStaySidebarOnly(sid){
   return !!(state&&state.sidebarOnly);
 }
 
+// Page-load latency: boot's saved-session metadata response is handed to the
+// loadSession() that follows it for the same session, instead of fetching the
+// identical metadata again one round trip later. One-shot and short-lived, so a
+// later navigation never sees it.
+let _bootSavedSessionMetadata=null;
+const _BOOT_SAVED_SESSION_METADATA_MAX_AGE_MS=3000;
+function _takeBootSavedSessionMetadata(sid){
+  const snap=_bootSavedSessionMetadata;
+  _bootSavedSessionMetadata=null;
+  if(!snap||snap.sid!==sid||Date.now()-snap.at>_BOOT_SAVED_SESSION_METADATA_MAX_AGE_MS) return null;
+  const session=snap.data&&snap.data.session;
+  return session&&session.session_id===sid ? snap.data : null;
+}
+
 async function _savedSessionSidebarOnlyState(sid){
   if(!sid) return false;
   try{
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    _bootSavedSessionMetadata={sid, data, at:Date.now()};
     const session = data&&data.session;
     const archived = !!(session&&session.archived);
     const running = !!(session&&(session.active_stream_id||session.pending_user_message));

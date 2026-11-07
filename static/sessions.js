@@ -2998,9 +2998,11 @@ async function loadSession(sid){
   try {
     // Background reconnect already fetched this exact session's snapshot.
     // Consume it once so availability cannot change between validation and load.
+    // Boot's saved-session check fetched the same metadata moments ago.
+    const bootMetadata=(typeof _takeBootSavedSessionMetadata==='function')?_takeBootSavedSessionMetadata(sid):null;
     data = sameSessionForceReload&&opts._resumeSnapshot?.session?.session_id===sid
       ? opts._resumeSnapshot
-      : await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+      : bootMetadata || await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const metadataErrorStatus=e.status;
     const profileMismatch=_sessionProfileMismatchFromError(e);
