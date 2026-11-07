@@ -78,8 +78,11 @@ class TestBootJsProfileDefaultWorkspace:
     def test_boot_sets_profile_default_workspace_from_profile_active(self):
         """Profile active bootstrap must override settings with p.default_workspace (#5169)."""
         src = read('static/boot.js')
-        active_idx = src.find("api('/api/profile/active'")
-        assert active_idx != -1, "/api/profile/active fetch not found in boot.js"
+        # Anchor on the profile bootstrap itself: boot also starts the same
+        # request earlier (alongside /api/settings) through a small helper.
+        active_idx = src.find("async function _resolveActiveProfileBootstrapState(")
+        assert active_idx != -1, "/api/profile/active bootstrap not found in boot.js"
+        assert "api('/api/profile/active'" in src[active_idx:active_idx + 400]
         block = src[active_idx:active_idx + 1200]
         assert 'p.default_workspace' in block, (
             "boot.js must read default_workspace from /api/profile/active response"

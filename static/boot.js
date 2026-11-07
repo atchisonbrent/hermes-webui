@@ -126,8 +126,46 @@ function _takeBootSavedSessionMetadata(sid){
   return session&&session.session_id===sid ? snap.data : null;
 }
 
+// Page-load latency: boot starts /api/profile/active alongside /api/settings and
+// the profile bootstrap consumes that one in-flight request (one-shot).
+let _bootActiveProfileRequest=null;
+function _startBootActiveProfileRequest(){
+  const request=api('/api/profile/active', {redirect401: false});
+  if(request&&typeof request.catch==='function') request.catch(()=>{});
+  _bootActiveProfileRequest=request;
+}
+function _takeBootActiveProfileRequest(){
+  const request=_bootActiveProfileRequest;
+  _bootActiveProfileRequest=null;
+  return request;
+}
+
+// Page-load latency: boot can start the saved-session check while the
+// conversation list loads; the check itself then consumes that in-flight
+// result for the same session instead of waiting one more round trip.
+// The sidebar-only decision (#1694: never project a running or archived saved
+// session) must stay based on a near-current read, so a prefetch older than
+// the list render normally takes is re-checked instead of trusted. Only the
+// restore's check consumes it; nothing else calls _savedSessionSidebarOnlyState.
+let _bootSavedSessionStatePrefetch=null;
+const _BOOT_SAVED_SESSION_PREFETCH_MAX_AGE_MS=2000;
+function _prefetchSavedSessionSidebarOnlyState(sid){
+  _bootSavedSessionStatePrefetch=null;
+  if(!sid) return;
+  const promise=_savedSessionSidebarOnlyState(sid);
+  _bootSavedSessionStatePrefetch={sid, promise, at:Date.now()};
+}
+function _takeSavedSessionSidebarOnlyStatePrefetch(sid){
+  const prefetch=_bootSavedSessionStatePrefetch;
+  _bootSavedSessionStatePrefetch=null;
+  if(!prefetch||prefetch.sid!==sid||Date.now()-prefetch.at>_BOOT_SAVED_SESSION_PREFETCH_MAX_AGE_MS) return null;
+  return prefetch.promise;
+}
+
 async function _savedSessionSidebarOnlyState(sid){
   if(!sid) return false;
+  const prefetched=_takeSavedSessionSidebarOnlyStatePrefetch(sid);
+  if(prefetched) return prefetched;
   try{
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
     _bootSavedSessionMetadata={sid, data, at:Date.now()};
@@ -4102,6 +4140,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // Load send key preference
   let _bootSettings={};
   const prefillIntent=(typeof _composerPrefillIntentFromLocation==='function')?_composerPrefillIntentFromLocation():null;
+  // Page-load latency: the active-profile request does not depend on settings,
+  // so it runs alongside it; the profile bootstrap below awaits this same
+  // request (same options and error handling) instead of starting it after.
+  _startBootActiveProfileRequest();
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
@@ -4406,7 +4448,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     };
   })();
   async function _resolveActiveProfileBootstrapState({
-    loadActiveProfile = () => api('/api/profile/active', {redirect401: false}),
+    loadActiveProfile = () => (typeof _takeBootActiveProfileRequest==='function' && _takeBootActiveProfileRequest())
+      || api('/api/profile/active', {redirect401: false}),
     getNextUrl = () => window.location.pathname + window.location.search,
     redirectToLogin = (nextUrl) => {
       _bootActiveProfileUnauthRedirectBudget.redirectToLogin(nextUrl);
@@ -4558,6 +4601,20 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // metadata settles in parallel.
   const _workspaceListReady=loadWorkspaceList();
   const _onboardingReady=_bootSettings.onboarding_completed?Promise.resolve(false):loadOnboardingWizard();
+  // Page-load latency: when the restore below will run the saved-session check
+  // (no URL session, profile query or new-chat launch can change its target),
+  // start it now so it overlaps the conversation list. A target that changes
+  // anyway is simply not consumed.
+  {
+    const _prefetchUrlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
+    const _prefetchLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
+      ? window.HermesPWA.launchAction()
+      : null;
+    if(!_prefetchUrlSession&&!(profileIntent&&profileIntent.hasParam)
+       &&!_shouldStartFreshPwaChat(_prefetchLaunchAction,_prefetchUrlSession)){
+      try{_prefetchSavedSessionSidebarOnlyState(localStorage.getItem('hermes-webui-session'));}catch(_){}
+    }
+  }
   // Render the session list before restoring the saved conversation so a stale
   // saved-session/client-side boot error cannot leave the sidebar empty forever.
   await renderSessionList();
