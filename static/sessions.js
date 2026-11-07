@@ -7909,7 +7909,7 @@ function _applySessionListPayload(sessData, projData, opts){
   const _hadSessionListLoadError = !!_sessionListLoadError;
   _sessionListLoadError = null;
   _sessionListHasLoadedOnce = true;
-  _noteSessionListFreshness(sessData);
+  if(typeof _noteSessionListFreshness === 'function') _noteSessionListFreshness(sessData);
   // Greptile #5975 P1: a /api/sessions request started under profile A can
   // finish after a switch to B already cleared A's cron markers. The list gen
   // check can already have passed (TOCTOU) or a deferred apply can land later.
@@ -8080,7 +8080,8 @@ async function _runRenderSessionListRefresh(opts, _gen){
   const unreadGen = (typeof _cronPollGeneration === 'number') ? _cronPollGeneration : 0;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
-    const sessionListQS = _sessionListQueryString() + _sessionListFreshnessQuery();
+    const sessionListQS = _sessionListQueryString()
+      + (typeof _sessionListFreshnessQuery === 'function' ? _sessionListFreshnessQuery() : '');
     // #5394: the sidebar session-list GET is idempotent, so 502/503/504 retry
     // must be unconditional. Previously retries/retryStatuses were boot-gated, so
     // a transient 502 during an nginx->backend restart on a warm refresh (profile

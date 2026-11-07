@@ -117,5 +117,6 @@ def test_list_request_appends_freshness_query():
     body = extract_function(src, "_runRenderSessionListRefresh", prefix="async function")
     apply_body = extract_function(src, "_applySessionListPayload")
 
-    assert "_sessionListQueryString() + _sessionListFreshnessQuery()" in body
+    assert "_sessionListFreshnessQuery()" in body
+    assert body.index("_sessionListQueryString()") < body.index("_sessionListFreshnessQuery()")
     assert "_noteSessionListFreshness(sessData);" in apply_body
