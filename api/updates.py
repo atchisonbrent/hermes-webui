@@ -1055,6 +1055,34 @@ def channel_version_badge(channel=None) -> str:
     return WEBUI_VERSION
 
 
+_CHANNEL_VERSION_BADGE_TTL_SECONDS = 60.0
+_CHANNEL_VERSION_BADGE_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
+_CHANNEL_VERSION_BADGE_CACHE_LOCK = threading.Lock()
+
+
+def cached_channel_version_badge(channel=None) -> str:
+    """``channel_version_badge`` memoized briefly for ``GET /api/settings``.
+
+    The badge costs two to four git subprocesses (``describe`` plus the dirty
+    probe), about 65 ms per call, and ``/api/settings`` is awaited before the
+    page-load session list and is re-fetched by the version-skew monitor on
+    focus and every minute. The badge is display-only and changes only when the
+    checkout does, so a short TTL keyed on channel and checkout is ample.
+    """
+    if channel is None:
+        channel = _read_update_channel()
+    key = (_normalize_channel(channel), str(REPO_ROOT))
+    now = time.monotonic()
+    with _CHANNEL_VERSION_BADGE_CACHE_LOCK:
+        hit = _CHANNEL_VERSION_BADGE_CACHE.get(key)
+        if hit is not None and now - hit[0] < _CHANNEL_VERSION_BADGE_TTL_SECONDS:
+            return hit[1]
+    badge = channel_version_badge(key[0])
+    with _CHANNEL_VERSION_BADGE_CACHE_LOCK:
+        _CHANNEL_VERSION_BADGE_CACHE[key] = (time.monotonic(), badge)
+    return badge
+
+
 def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):
     """Return the channel's release tags newest-first.
 

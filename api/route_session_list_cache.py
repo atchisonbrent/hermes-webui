@@ -36,6 +36,12 @@ _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
+# Page-load latency: a page load may be answered from the last cached list even
+# when its sources changed (``allow_stale=1``); the response then carries
+# ``stale: true`` and the browser's follow-up refresh (``wait_rebuild=1``) waits
+# up to this long for the background rebuild instead of returning stale again.
+# Keep it well below the browser's default 30 s request timeout.
+_SESSIONS_CACHE_AWAIT_REBUILD_SECONDS = 15.0
 _SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
 _SESSIONS_CACHE_LOCK = threading.RLock()
 _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
