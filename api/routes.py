@@ -2778,6 +2778,7 @@ _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION = (
     _route_session_list_cache._SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION
 )
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = _route_session_list_cache._SESSIONS_CACHE_STALE_WAIT_SECONDS
+_SESSIONS_CACHE_AWAIT_REBUILD_SECONDS = _route_session_list_cache._SESSIONS_CACHE_AWAIT_REBUILD_SECONDS
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = (
     _route_session_list_cache._SESSIONS_CACHE_STREAMING_TTL_SECONDS
 )
@@ -3797,7 +3798,26 @@ def _get_cached_session_list_payload(
     key: tuple,
     builder,
     diag=None,
+    serve_source_stale: bool = False,
+    await_rebuild: bool = False,
+    freshness: dict | None = None,
 ) -> dict:
+    """Return the session-list payload for *key*, rebuilding through the cache.
+
+    A fresh entry is a hit. An entry that is only past its TTL is served stale
+    while one background rebuild refreshes it. An entry whose sources changed is
+    normally rebuilt synchronously, because the caller may depend on its own
+    write being visible.
+
+    ``serve_source_stale`` (``allow_stale=1``, a page load's first list) also
+    serves a source-changed entry immediately and rebuilds it in the background:
+    a cold rebuild can take seconds after idle, and the first paint should not
+    wait for it. ``await_rebuild`` (``wait_rebuild=1``, the browser's follow-up)
+    makes a caller that finds a rebuild in flight wait for it for up to
+    ``_SESSIONS_CACHE_AWAIT_REBUILD_SECONDS`` rather than the short stale wait.
+    Whenever a source-changed entry is returned, ``freshness["source_stale"]``
+    is set (when a dict is passed) so the response can carry ``stale: true``.
+    """
     if diag is not None:
         try:
             diag.stage("session_list_cache_lookup")
@@ -3815,7 +3835,7 @@ def _get_cached_session_list_payload(
 
     stale = cached  # now actually a stale payload when one exists, else None
     stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
-    if stale is not None and stale_reason != "source":
+    if stale is not None and (stale_reason != "source" or serve_source_stale):
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
             if diag is not None:
@@ -3865,6 +3885,8 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_stale_return")
             except Exception:
                 pass
+        if stale_reason == "source" and freshness is not None:
+            freshness["source_stale"] = True
         return stale
 
     event, is_owner = _session_list_cache_claim_rebuild(key)
@@ -3913,7 +3935,9 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
 
-    if stale is not None:
+    if await_rebuild:
+        timeout = _SESSIONS_CACHE_AWAIT_REBUILD_SECONDS
+    elif stale is not None:
         timeout = _SESSIONS_CACHE_STALE_WAIT_SECONDS
     else:
         timeout = _SESSIONS_CACHE_WAIT_SECONDS
@@ -3934,6 +3958,8 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_wait_stale_fallback")
             except Exception:
                 pass
+        if stale_reason == "source" and freshness is not None:
+            freshness["source_stale"] = True
         return stale
 
     # Safety path if the owner died before storing anything.
@@ -18549,6 +18575,7 @@ def handle_get(handler, parsed) -> bool:
             # heavy lifting now lives in the cache builder: profile scoping via
             # `_profiles_match(s.get("profile"), active_profile)` still happens
             # before `_keep_latest_messaging_session_per_source(`.
+            freshness: dict = {}
             payload = _get_cached_session_list_payload(
                 key=key,
                 builder=lambda: _build_session_list_cache_payload(
@@ -18570,9 +18597,17 @@ def handle_get(handler, parsed) -> bool:
                     diag=diag,
                 ),
                 diag=diag,
+                serve_source_stale=_query_flag(parsed, "allow_stale"),
+                await_rebuild=_query_flag(parsed, "wait_rebuild"),
+                freshness=freshness,
             )
             diag.stage("response_write")
-            return j(handler, _session_list_payload_to_response(payload), pretty=False)
+            response = _session_list_payload_to_response(payload)
+            if freshness.get("source_stale"):
+                # The last cached list, served while its sources changed; the
+                # browser follows up with wait_rebuild=1.
+                response["stale"] = True
+            return j(handler, response, pretty=False)
         finally:
             diag.finish()
 

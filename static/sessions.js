@@ -694,6 +694,16 @@ let _pendingSessionListApplyTimer = 0;
 let _sessionListLoadError = null;
 let _sessionListHasLoadedOnce = false;
 const _SESSION_LIST_BOOT_TIMEOUT_MS = 90000;
+// Page-load latency: the first list of a page load asks for the server's last
+// cached list (allow_stale=1) so it never waits on a cold rebuild. A response
+// marked `stale` schedules one background follow-up that waits for the rebuild
+// (wait_rebuild=1) once boot and any in-flight list refresh have settled.
+let _sessionListServedStale = false;
+let _sessionListAwaitRebuildNext = false;
+let _sessionListStaleFollowUpTimer = 0;
+let _sessionListStaleFollowUps = 0;
+const _SESSION_LIST_STALE_FOLLOW_UP_MS = 250;
+const _SESSION_LIST_STALE_FOLLOW_UP_MAX = 3;
 const SESSION_LIST_INTERACTION_IDLE_MS = 700;
 const SESSION_SWIPE_DURATION_MS = 500;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 220;
@@ -3795,6 +3805,39 @@ function _sessionListQueryString() {
     }
   }
   return `?${qs.toString()}`;
+}
+
+function _sessionListFreshnessQuery() {
+  if(!_sessionListHasLoadedOnce) return '&allow_stale=1';
+  if(_sessionListAwaitRebuildNext){
+    _sessionListAwaitRebuildNext = false;
+    return '&wait_rebuild=1';
+  }
+  return '';
+}
+
+function _noteSessionListFreshness(sessData) {
+  _sessionListServedStale = !!(sessData && sessData.stale === true);
+  if(!_sessionListServedStale){
+    _sessionListStaleFollowUps = 0;
+    return;
+  }
+  if(_sessionListStaleFollowUpTimer || _sessionListStaleFollowUps >= _SESSION_LIST_STALE_FOLLOW_UP_MAX) return;
+  _sessionListStaleFollowUpTimer = setTimeout(_runSessionListStaleFollowUp, _SESSION_LIST_STALE_FOLLOW_UP_MS);
+}
+
+function _runSessionListStaleFollowUp() {
+  _sessionListStaleFollowUpTimer = 0;
+  if(!_sessionListServedStale) return;
+  // Boot refreshes the list itself once ready, and a list request already in
+  // flight may come back fresh; never supersede either with a waiting request.
+  if((typeof S !== 'undefined' && S && !S._bootReady) || _renderSessionListInFlight){
+    _sessionListStaleFollowUpTimer = setTimeout(_runSessionListStaleFollowUp, _SESSION_LIST_STALE_FOLLOW_UP_MS);
+    return;
+  }
+  _sessionListStaleFollowUps += 1;
+  _sessionListAwaitRebuildNext = true;
+  void _refreshSidebarForBackgroundChurn();
 }
 
 function _sessionSourceTabCount(filter, renderedWebuiSessionCount, renderedCliSessionCount) {
@@ -7864,6 +7907,7 @@ function _applySessionListPayload(sessData, projData, opts){
   const _hadSessionListLoadError = !!_sessionListLoadError;
   _sessionListLoadError = null;
   _sessionListHasLoadedOnce = true;
+  _noteSessionListFreshness(sessData);
   // Greptile #5975 P1: a /api/sessions request started under profile A can
   // finish after a switch to B already cleared A's cron markers. The list gen
   // check can already have passed (TOCTOU) or a deferred apply can land later.
@@ -8034,7 +8078,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
   const unreadGen = (typeof _cronPollGeneration === 'number') ? _cronPollGeneration : 0;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
-    const sessionListQS = _sessionListQueryString();
+    const sessionListQS = _sessionListQueryString() + _sessionListFreshnessQuery();
     // #5394: the sidebar session-list GET is idempotent, so 502/503/504 retry
     // must be unconditional. Previously retries/retryStatuses were boot-gated, so
     // a transient 502 during an nginx->backend restart on a warm refresh (profile
