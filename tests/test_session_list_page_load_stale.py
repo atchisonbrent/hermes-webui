@@ -180,6 +180,8 @@ def test_plain_follower_during_rebuild_gets_marked_stale(monkeypatch):
         assert freshness == {"source_stale": True}, "the browser needs the flag to follow up"
     finally:
         release.set()
+    # Let the background rebuild finish before the fixture clears the cache.
+    assert _wait_for_cached(key, "fresh") is not None
 
 
 def test_sessions_route_passes_flags_and_marks_stale_response(monkeypatch):
