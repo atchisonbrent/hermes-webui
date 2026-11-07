@@ -277,6 +277,20 @@ without ruff aren't blocked, while CI (which installs ruff) enforces it. The
 diff-scoped gate runs as the `lint` job in `.github/workflows/tests.yml` and is
 also part of the maintainer pre-release pre-gate.
 
+## Saved-conversation restore overlap (manual browser harness)
+
+Run `python tests/browser_boot_restore_overlap.py` (Playwright + Chromium; set
+`PLAYWRIGHT_BROWSERS_PATH` if your browsers are cached elsewhere). It is not wired
+into CI. It boots the real `server.py` agent-free, seeds a saved session and routes
+only that session's `/api/session` reads to a fixture. It asserts that the restore:
+
+- succeeds with no console errors;
+- reads the saved-session metadata once;
+- starts `/api/profile/active` before `/api/settings` finishes;
+- starts the saved-session check before `/api/sessions` finishes.
+
+It fails on code that serializes those requests.
+
 ## Automated browser smoke (runtime brick-class gate)
 
 The ESLint guard above catches `const`-reassign / import-assign statically. The

@@ -143,8 +143,12 @@ function _takeBootActiveProfileRequest(){
 // Page-load latency: boot can start the saved-session check while the
 // conversation list loads; the check itself then consumes that in-flight
 // result for the same session instead of waiting one more round trip.
+// The sidebar-only decision (#1694: never project a running or archived saved
+// session) must stay based on a near-current read, so a prefetch older than
+// the list render normally takes is re-checked instead of trusted. Only the
+// restore's check consumes it; nothing else calls _savedSessionSidebarOnlyState.
 let _bootSavedSessionStatePrefetch=null;
-const _BOOT_SAVED_SESSION_PREFETCH_MAX_AGE_MS=10000;
+const _BOOT_SAVED_SESSION_PREFETCH_MAX_AGE_MS=2000;
 function _prefetchSavedSessionSidebarOnlyState(sid){
   _bootSavedSessionStatePrefetch=null;
   if(!sid) return;

@@ -7,7 +7,8 @@ conversation paints:
   consumes that same in-flight request (same options, same error handling);
 * the saved-session sidebar-only check starts before the conversation list is
   awaited, and the check itself consumes the in-flight result for the same
-  session id (one-shot, 10 s maximum age).
+  session id (one-shot; older than 2 s it is re-checked, so the #1694
+  sidebar-only decision stays based on a near-current read).
 """
 
 import json
@@ -124,6 +125,13 @@ def test_prefetch_helpers_are_one_shot_matched_and_bounded():
     assert out["leftoverAfterOtherSid"] is None, "any check clears the prefetch"
     assert out["callsExpired"] == 2, "an expired prefetch is refetched"
     assert out["callsNullSid"] == 0
+
+
+def test_prefetch_trust_window_stays_short():
+    """#1694: the sidebar-only decision must not rest on a read from seconds earlier."""
+    start = BOOT_JS.index("const _BOOT_SAVED_SESSION_PREFETCH_MAX_AGE_MS=")
+    value = int(BOOT_JS[start:BOOT_JS.index(";", start)].split("=")[1])
+    assert 0 < value <= 3000
 
 
 def _boot_iife() -> str:

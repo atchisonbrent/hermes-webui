@@ -11,6 +11,9 @@ agent is available to create messages), and asserts that the page:
 * starts the saved-session metadata before /api/sessions has finished.
 
 Run: python tests/browser_boot_restore_overlap.py (needs playwright + chromium).
+Manual harness, not wired into CI. The single-metadata-read assertion assumes the
+conversation list renders within the 2 s prefetch trust window, as it does on a
+local agent-free server; a much slower runner would legitimately re-check.
 """
 import os
 import sys
