@@ -18343,10 +18343,10 @@ def handle_get(handler, parsed) -> bool:
         # load-bearing for asset cache-busting / SW cache / skew detection and
         # must stay channel-neutral). update_channel_version is display-only.
         try:
-            from api.updates import channel_version_badge, _read_update_channel
+            from api.updates import cached_channel_version_badge, _read_update_channel
             channel = _read_update_channel()
             settings["update_channel"] = channel
-            settings["update_channel_version"] = channel_version_badge(channel)
+            settings["update_channel_version"] = cached_channel_version_badge(channel)
         except Exception:
             pass
         return j(handler, settings)
