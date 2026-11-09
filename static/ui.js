@@ -19928,11 +19928,14 @@ function ensureActivityGroup(inner, opts){
       : Array.from(inner.querySelectorAll('.tool-worklog-group[data-agent-activity-group="1"],.tool-call-group[data-agent-activity-group="1"]:not([data-run-activity-group="1"])'));
     group=candidates.filter(el=>el.isConnected!==false).pop() || null;
   }
+  // Declared at function scope: the existing-group branch below also stamps it
+  // (block-scoping it inside `if(!group)` made every live update after the
+  // first throw a ReferenceError and stopped live streaming).
+  const disclosureKey=opts.disclosureKey||activityKey;
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
     if(window._worklogDetailsExpandedByDefault===true) collapsed=false;
-    const disclosureKey=opts.disclosureKey||activityKey;
     const savedState=_readActivityDisclosureState(disclosureKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
