@@ -78,10 +78,15 @@ def test_live_prompt_estimate_reanchors_to_fresh_exact_prompt_tokens():
 def test_done_payload_persists_final_tps_when_exact_usage_available():
     assert "usage['tps']" in STREAMING_PY, "done usage payload should include final exact TPS when available"
     assert "output_tokens" in STREAMING_PY and "duration_seconds" in STREAMING_PY, (
-        "final TPS should be based on exact completion tokens over measured turn duration"
+        "final TPS should use completed model-call durations, not command-wait wall time"
     )
     assert "d.usage.tps" in MESSAGES_JS, "done handler should read final TPS from the usage payload"
-    assert "lastAsst._turnTps" in MESSAGES_JS, "done handler should persist final TPS on the last assistant message"
+    assert "_recordTurnGenerationTps(lastAsst,d.usage&&d.usage.tps)" in MESSAGES_JS, (
+        "done handler should write final TPS onto the last assistant message"
+    )
+    assert "message._turnTps=tps" in MESSAGES_JS, (
+        "the helper should preserve the settled header's exact final TPS field"
+    )
 
 
 def test_backend_marks_streaming_metering_availability_explicitly():

@@ -15838,6 +15838,30 @@ function _formatTurnTps(value){
   const fixed=n>=100?Math.round(n).toLocaleString():n>=10?n.toFixed(1):n.toFixed(1);
   return `${fixed} t/s`;
 }
+function _setComposerTps(value){
+  const chip=$('composerTps');
+  if(!chip) return;
+  const n=Number(value);
+  const fixed=Number.isFinite(n)&&n>0
+    ? (n>=100?Math.round(n).toLocaleString():n.toFixed(1))
+    : '';
+  chip.textContent=fixed?`${fixed} tps`:'—';
+}
+function _syncComposerTps(){
+  let latest=null;
+  const messages=typeof S!=='undefined'&&Array.isArray(S.messages)?S.messages:[];
+  for(let index=messages.length-1;index>=0;index--){
+    const message=messages[index];
+    if(!message||message.role!=='assistant') continue;
+    if(message._live) continue;
+    // Non-model local-command rows have no completion marker. They must not
+    // clear the latest rate; a real completed turn without TPS must clear it.
+    if(message._turnGenerationRecorded!==true) continue;
+    latest=message._turnGenerationTps;
+    break;
+  }
+  if(typeof _setComposerTps==='function') _setComposerTps(latest);
+}
 function isTpsDisplayEnabled(){
   return window._showTps===true;
 }
@@ -22684,6 +22708,7 @@ function _assistantSegmentIsTurnFinal(row, mi){
   return !last||String(last.dataset.msgIdx)===String(mi);
 }
 function renderMessages(options){
+  if(typeof _syncComposerTps==='function') _syncComposerTps();
   _lastMessageRenderAt=performance.now();
   // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
   if(!(options&&options._internalMeasurement) && typeof _resetMessageVirtualMeasurementBurst==='function'){ _resetMessageVirtualMeasurementBurst(); }

@@ -2954,6 +2954,7 @@
   .composer-mobile-context-action.ctx-high .composer-mobile-context-compress{border-color:var(--error);color:var(--error);}
   .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;}
   .composer-status{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;}
+  .composer-tps{font-size:11px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums;}
   /* Context usage indicator */
   .ctx-indicator-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}
   .ctx-indicator{width:34px;height:34px;padding:0;border:none;background:none;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s,transform .15s;}
@@ -3304,7 +3305,7 @@
   .composer-footer.cf-burger .composer-mobile-config-panel.open{display:flex;}
   .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
-  .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
+  .composer-footer.cf-burger .ctx-indicator-wrap,.composer-footer.cf-burger .composer-tps{display:none!important;}
 
   /* Show session-toolsets chip ONLY when the composer-footer container is wide
      enough to comfortably accommodate it (workspace+model+reasoning+profile+
@@ -3475,7 +3476,7 @@
     .composer-divider{display:none;}
     .composer-status{flex:0 1 auto;min-width:0;max-width:96px;font-size:10px;text-align:right;}
     .send-btn{width:44px;height:44px;}
-    .ctx-indicator-wrap{display:none!important;}
+    .ctx-indicator-wrap,.composer-tps{display:none!important;}
     .ctx-indicator{width:44px;height:44px;}
     .ctx-tooltip{right:-4px;min-width:190px;max-width:220px;}
     .composer-terminal-panel{width:calc(100% - 20px);}

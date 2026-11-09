@@ -141,7 +141,7 @@ globalThis.localStorage = {
 };
 // Closure-scope constant that lives just above the extracted helper in
 // messages.js (extract_function only captures the function body).
-const _EPHEMERAL_TURN_FIELDS = ['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+const _EPHEMERAL_TURN_FIELDS = ['_turnUsage','_turnDuration','_turnTps','_turnGenerationTps','_turnGenerationRecorded','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
 for (const fn of deps) eval(fn);
 
 // Scenario: repeated identical turns in the visible window, a terminal

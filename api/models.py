@@ -14245,6 +14245,8 @@ def _session_messages_have_prefix(messages, prefix) -> bool:
 _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     "_turnDuration",
     "_turnTps",
+    "_turnGenerationTps",
+    "_turnGenerationRecorded",
     "_turnUsage",
     "_firstTokenMs",
     "_usedModel",
@@ -14274,6 +14276,13 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
     if not isinstance(target, dict) or not isinstance(source, dict):
         return
     for key in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS:
+        if (key == "_turnGenerationTps"
+                and target.get("_turnGenerationRecorded") is True
+                and "_turnGenerationTps" not in target
+                and source.get("_turnGenerationRecorded") is not True):
+            # An explicit completed-but-unavailable turn must not resurrect a
+            # prior turn's positive generation rate from a duplicate mirror.
+            continue
         if _message_display_metadata_value_present(target.get(key)):
             continue
         value = source.get(key)
