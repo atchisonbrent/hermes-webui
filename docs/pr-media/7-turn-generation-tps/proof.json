@@ -1,0 +1,28 @@
+{
+  "capture_sha": "b4b6f7169c091ff63de979718a7473042f74d56d",
+  "semantic_delta_sha": "6b524b3b204dfcd07233e8bcd871f243d9f2ebd9",
+  "base_sha": "cab0853ba055f4c371fef8538146e9406c257231",
+  "desktop_commands": {
+    "plain_local_command": "120 tps",
+    "status_card": "120 tps"
+  },
+  "desktop": {
+    "tps": "120 tps",
+    "display": "block",
+    "nextSibling": "ctxIndicatorWrap"
+  },
+  "base_desktop": {
+    "tps": "absent",
+    "display": "absent",
+    "nextSibling": "absent"
+  },
+  "mobile": {
+    "scrollWidth": 390,
+    "innerWidth": 390,
+    "tps_display": "none",
+    "sidebar": "closed",
+    "composer": "fully visible"
+  },
+  "synthetic_metadata": true,
+  "actual_provider_call": false
+}
