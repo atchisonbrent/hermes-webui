@@ -13158,6 +13158,7 @@ function _applySavedSettingsUi(saved, body, opts){
   if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
   window._showBusyPlaceholderHint=showBusyPlaceholderHint===true;
   window._showTps=showTps;
+  if(typeof _syncComposerTps==='function') _syncComposerTps();
   window._fadeTextEffect=!!fadeTextEffect;
   window._showCliSessions=showCliSessions;
   window._showPreviousMessagingSessions=!!body.show_previous_messaging_sessions;

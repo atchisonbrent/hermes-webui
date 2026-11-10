@@ -40,11 +40,13 @@ def test_new_generation_metric_never_exposes_legacy_wall_clock_history():
     assert "_syncComposerTps" in UI
 
 
-def test_composer_ignores_legacy_setting_and_preserves_legacy_header_format():
-    assert "isTpsDisplayEnabled()?_setComposerTps" not in UI
-    assert "isTpsDisplayEnabled()?_syncComposerTps" not in UI
-    assert "${fixed} t/s" in UI
+def test_composer_is_the_only_readout_and_starts_hidden():
     assert "${fixed} tps" in UI
+    assert "${fixed} t/s" not in UI, "the header chip and its format were removed"
+    chip = INDEX[INDEX.index('id="composerTps"'):]
+    chip = chip[:chip.index("</span>")]
+    assert chip.rstrip().endswith("hidden>"), "no rate yet: the chip must not render a placeholder"
+    assert ".composer-tps[hidden]{display:none;}" in CSS
 
 
 def test_collapsed_composer_hides_only_inside_its_responsive_scope():

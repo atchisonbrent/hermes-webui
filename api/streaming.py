@@ -18488,7 +18488,7 @@ def _run_agent_streaming(
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
                 put('done', _done_payload)
-                # Emit one last metering packet for the live message-header TPS label.
+                # Emit one last metering packet so stream consumers see the final reading.
                 meter_stats = meter().get_stats(stream_id)
                 meter_stats['session_id'] = session_id
                 meter_stats.setdefault('tps_available', False)

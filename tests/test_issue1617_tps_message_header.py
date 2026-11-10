@@ -1,8 +1,10 @@
-"""Regression coverage for issue #1617: TPS belongs on message headers.
+"""Regression coverage for the TPS readout that began as issue #1617.
 
-Product decision:
-- show live TPS in the assistant message header while streaming when real TPS is available;
-- persist/show the final TPS at the end of the turn;
+Product decision (revised 2026-11-09):
+- one readout, in the composer beside the context indicator, for the latest
+  completed turn; the assistant message header no longer carries a TPS chip;
+- nothing live while streaming: the live meter divided stream deltas by a span
+  that included tool execution, so it read low and kept disappearing;
 - do not show placeholder or estimated TPS when unavailable.
 """
 from pathlib import Path
@@ -18,32 +20,24 @@ UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
-def test_tps_renders_in_message_header_not_global_titlebar():
-    assert "msg-tps-inline" in UI_JS, "assistant message headers need a TPS chip hook"
-    assert "msg-tps-inline" in CSS, "TPS header chip needs an explicit CSS hook"
-    assert "_assistantRoleHtml(tsTitle='', tpsText='')" in UI_JS, (
-        "assistant role/header rendering should accept the per-message TPS text"
-    )
-    assert "_formatTurnTps" in UI_JS, "TPS formatting should be centralized"
-    assert "_turnTps" in UI_JS, "settled assistant messages should render final TPS from message metadata"
+def test_tps_is_not_rendered_in_message_headers_or_the_global_titlebar():
+    for source, name in ((UI_JS, "ui.js"), (CSS, "style.css"), (MESSAGES_JS, "messages.js")):
+        assert "msg-tps-inline" not in source, f"{name}: the header TPS chip was removed"
+    assert "_assistantRoleHtml(tsTitle='')" in UI_JS, "assistant headers take no TPS text"
+    assert "_formatTurnTps" not in UI_JS and "_setLiveAssistantTps" not in UI_JS
     assert "tpsStat" not in MESSAGES_JS, "live TPS must not target the removed/global titlebar chip"
 
 
-def test_live_metering_updates_only_real_tps_and_never_placeholders():
+def test_live_metering_never_renders_a_tps_readout():
     listener_start = MESSAGES_JS.find("source.addEventListener('metering'")
     assert listener_start != -1, "messages.js should listen for metering SSE events"
     listener_end = MESSAGES_JS.find("source.addEventListener('apperror'", listener_start)
     assert listener_end != -1, "apperror listener should follow metering listener"
     listener = MESSAGES_JS[listener_start:listener_end]
-    assert "_setLiveAssistantTps" in listener, "live metering should update the live assistant header"
-    assert "tps_available" in listener and "estimated" in listener, (
-        "live TPS display must check availability and reject estimated readings"
+    assert "d.tps" not in listener and "Tps" not in listener, (
+        "the live meter's span includes tool execution; it must not feed any readout"
     )
-    assert "0.0 t/s" not in listener, "unavailable TPS should render nothing, not a 0.0 placeholder"
-    assert "'—'" not in listener and '"—"' not in listener, "unavailable TPS should render nothing, not a dash"
-    assert "high" not in listener.lower() and "low" not in listener.lower(), (
-        "message-header TPS should not carry global HIGH/LOW titlebar semantics"
-    )
+    assert "_syncCtxIndicator" in listener, "metering still drives the live context indicator"
 
 
 def test_live_metering_usage_is_provisional_until_done():
@@ -85,7 +79,7 @@ def test_done_payload_persists_final_tps_when_exact_usage_available():
         "done handler should write final TPS onto the last assistant message"
     )
     assert "message._turnTps=tps" in MESSAGES_JS, (
-        "the helper should preserve the settled header's exact final TPS field"
+        "the helper should keep the settled message's exact final TPS field"
     )
 
 
@@ -134,15 +128,22 @@ def test_tps_display_hot_applies_when_preferences_autosave():
     )
 
 
-def test_tps_header_rendering_respects_display_setting():
+def test_tps_readout_respects_display_setting():
     assert "function isTpsDisplayEnabled()" in UI_JS, "TPS visibility should be centralized"
     assert "return window._showTps===true" in UI_JS, "TPS should only render when explicitly enabled"
-    assert "const tps=(isTpsDisplayEnabled()&&tpsText)" in UI_JS, (
-        "settled assistant headers must suppress TPS when the setting is off"
+    assert "const fixed=isTpsDisplayEnabled()&&Number.isFinite(n)&&n>0" in UI_JS, (
+        "the composer readout must be suppressed when the setting is off"
     )
-    assert "isTpsDisplayEnabled()?_formatTurnTps(value):''" in UI_JS, (
-        "live TPS updates must remove/suppress the chip when the setting is off"
-    )
-    assert "isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):''" in UI_JS, (
-        "reloaded assistant messages must not render persisted TPS while disabled"
+    assert "chip.hidden=!fixed" in UI_JS, "no rate must hide the readout, not show a placeholder"
+    assert "window._showTps=showTps;\n  if(typeof _syncComposerTps==='function') _syncComposerTps();" in PANELS_JS
+    assert "window._showTps=!!s.show_tps;\n    if(typeof _syncComposerTps==='function') _syncComposerTps();" in BOOT_JS
+    assert "window._showTps=false;\n    if(typeof _syncComposerTps==='function') _syncComposerTps();" in BOOT_JS
+
+
+def test_settled_turn_memo_does_not_depend_on_the_tps_preference():
+    start = UI_JS.index("function _settledTurnMemoInput(")
+    memo_input = UI_JS[start:UI_JS.index("\nfunction ", start + 1)]
+    assert "assistantDisplayName()" in memo_input, "sanity: this is the settled-turn memo input"
+    assert "isTpsDisplayEnabled" not in memo_input, (
+        "message rows no longer render TPS; toggling it must not rebuild every settled turn"
     )

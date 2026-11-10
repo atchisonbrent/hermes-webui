@@ -156,7 +156,6 @@ for (const name of [
   '_hydrateTodosFromSession',
   'syncModelChip',
   'syncReasoningChip',
-  '_setLiveAssistantTps',
   '_syncCtxIndicator',
   'showToast',
 ]) {

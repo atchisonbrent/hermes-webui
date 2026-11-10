@@ -266,3 +266,88 @@ def test_restoring_an_unavailable_baseline_does_not_trim_a_concurrent_turn():
     assert agent._api_output_history.maxlen == widened
     restore_turn_generation_history(live)
     assert agent._api_latency_history.maxlen == 2
+
+
+def _streaming_agent():
+    """An Agent that also records each call's first-chunk-to-end seconds."""
+    agent = _agent()
+    agent._api_generation_history = deque([60.0, 70.0], maxlen=2)
+    return agent
+
+
+def _call(agent, *, latency, tokens, window=None):
+    agent._api_latency_history.append(latency)
+    agent._api_output_history.append(tokens)
+    if window is not None:
+        agent._api_generation_history.append(window)
+    agent.session_api_calls += 1
+
+
+def test_rate_counts_only_the_streaming_window_of_each_call():
+    agent = _streaming_agent()
+    start = begin_turn_generation_history(agent)
+    # 10 s and 20 s calls that each waited for their first chunk; a tool ran
+    # for a minute between them. Only 2 s + 4 s were spent generating.
+    _call(agent, latency=10.0, tokens=100, window=2.0)
+    _call(agent, latency=20.0, tokens=200, window=4.0)
+    try:
+        assert turn_tps_from_generation_history(agent, start) == 50.0
+    finally:
+        restore_turn_generation_history(start)
+    assert agent._api_generation_history == deque([2.0, 4.0], maxlen=2)
+    assert agent._api_generation_history.maxlen == 2
+
+
+def test_agent_without_streaming_windows_keeps_whole_call_time():
+    agent = _agent()
+    start = begin_turn_generation_history(agent)
+    assert start.generations is None
+    _call(agent, latency=4.0, tokens=100)
+    _call(agent, latency=8.0, tokens=200)
+    try:
+        assert turn_tps_from_generation_history(agent, start) == 25.0
+    finally:
+        restore_turn_generation_history(start)
+    assert not hasattr(agent, '_api_generation_history'), 'never invented on an older Agent'
+
+
+@pytest.mark.parametrize('window', [0.0, -1.0, 11.0, 0.001, None, True, float('nan')])
+def test_an_unbelievable_window_falls_back_to_that_calls_duration(window):
+    """Zero or negative, longer than the call, or too short for its tokens."""
+    agent = _streaming_agent()
+    start = begin_turn_generation_history(agent)
+    agent._api_latency_history.append(10.0)
+    agent._api_output_history.append(100)
+    agent._api_generation_history.append(window)
+    agent.session_api_calls += 1
+    _call(agent, latency=10.0, tokens=100, window=2.0)
+    try:
+        # 200 tokens over 10 s (fallback) + 2 s (trusted).
+        assert turn_tps_from_generation_history(agent, start) == round(200 / 12.0, 1)
+    finally:
+        restore_turn_generation_history(start)
+
+
+def test_unpaired_streaming_windows_fall_back_for_the_whole_turn():
+    agent = _streaming_agent()
+    start = begin_turn_generation_history(agent)
+    _call(agent, latency=4.0, tokens=100, window=1.0)
+    _call(agent, latency=8.0, tokens=200)  # this call recorded no window
+    try:
+        assert turn_tps_from_generation_history(agent, start) == 25.0
+    finally:
+        restore_turn_generation_history(start)
+
+
+def test_streaming_windows_survive_more_calls_than_the_rolling_cap():
+    agent = _streaming_agent()
+    agent.max_iterations = sys.maxsize
+    start = begin_turn_generation_history(agent)
+    assert agent._api_generation_history.maxlen == 2 + MAX_TURN_HISTORY_CALLS
+    for _ in range(25):
+        _call(agent, latency=10.0, tokens=100, window=2.0)
+    try:
+        assert turn_tps_from_generation_history(agent, start) == 50.0
+    finally:
+        restore_turn_generation_history(start)
+    assert agent._api_generation_history.maxlen == 2

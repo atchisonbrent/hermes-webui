@@ -15832,20 +15832,17 @@ function _isAssistantEmptyPlaceholderContent(m, content){
   if(String(content||'').trim()!=='(empty)') return false;
   return _messageHasReasoningPayload(m);
 }
-function _formatTurnTps(value){
-  const n=Number(value);
-  if(!Number.isFinite(n)||n<=0) return '';
-  const fixed=n>=100?Math.round(n).toLocaleString():n>=10?n.toFixed(1):n.toFixed(1);
-  return `${fixed} t/s`;
-}
 function _setComposerTps(value){
   const chip=$('composerTps');
   if(!chip) return;
   const n=Number(value);
-  const fixed=Number.isFinite(n)&&n>0
+  const fixed=isTpsDisplayEnabled()&&Number.isFinite(n)&&n>0
     ? (n>=100?Math.round(n).toLocaleString():n.toFixed(1))
     : '';
-  chip.textContent=fixed?`${fixed} tps`:'—';
+  // No rate (new chat, a turn whose provider reported no usage, or the
+  // preference off) shows nothing rather than a placeholder dash.
+  chip.textContent=fixed?`${fixed} tps`:'';
+  chip.hidden=!fixed;
 }
 function _syncComposerTps(){
   let latest=null;
@@ -15865,35 +15862,16 @@ function _syncComposerTps(){
 function isTpsDisplayEnabled(){
   return window._showTps===true;
 }
-function _assistantRoleHtml(tsTitle='', tpsText=''){
+function _assistantRoleHtml(tsTitle=''){
   const _bn=assistantDisplayName();
-  const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span></div>`;
 }
-function _setAssistantTurnTps(turn, tpsText=''){
-  if(!turn) return;
-  const role=turn.querySelector('.msg-role.assistant');
-  if(!role) return;
-  let chip=role.querySelector('.msg-tps-inline');
-  const text=String(tpsText||'').trim();
-  if(!text){if(chip) chip.remove();return;}
-  if(!chip){
-    chip=document.createElement('span');
-    chip.className='msg-tps-inline';
-    chip.title='Tokens per second';
-    role.appendChild(chip);
-  }
-  chip.textContent=text;
-}
-function _setLiveAssistantTps(value){
-  _setAssistantTurnTps($('liveAssistantTurn'), isTpsDisplayEnabled()?_formatTurnTps(value):'');
-}
-function _createAssistantTurn(tsTitle='', tpsText=''){
+function _createAssistantTurn(tsTitle=''){
   const row=document.createElement('div');
   row.className='msg-row assistant-turn';
   row.dataset.role='assistant';
   if(S.session) row.dataset.sessionId=S.session.session_id;
-  row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText)}<div class="assistant-turn-blocks"></div>`;
+  row.innerHTML=`${_assistantRoleHtml(tsTitle)}<div class="assistant-turn-blocks"></div>`;
   return row;
 }
 function _setLatestAssistantTurnLandmark(turn, isLatest){
@@ -17291,7 +17269,6 @@ function _wireTransparentTurnToggle(turn){
   role.setAttribute('tabindex','0');
   role.setAttribute('aria-expanded',turn.getAttribute('data-transparent-turn-collapsed')==='1'?'false':'true');
   const toggle=function(ev){
-    if(ev&&ev.target&&ev.target.closest&&ev.target.closest('.msg-tps-inline')) return;
     const collapsed=turn.getAttribute('data-transparent-turn-collapsed')==='1';
     turn.setAttribute('data-transparent-turn-collapsed',collapsed?'0':'1');
     role.setAttribute('aria-expanded',collapsed?'true':'false');
@@ -22463,8 +22440,7 @@ function _settledTurnMemoInput(start, visible, toolCalls, renderToolIndices){
     typeof _serverTz==='undefined'?'':_serverTz,
     chatActivityMode(),window._showThinking,window._simplifiedToolCalling,window._showTokenUsage,
     window._worklogDetailsExpandedByDefault,window._transparentEventTimestamps,
-    typeof assistantDisplayName==='function'?assistantDisplayName():'',
-    typeof isTpsDisplayEnabled==='function'&&isTpsDisplayEnabled()];
+    typeof assistantDisplayName==='function'?assistantDisplayName():''];
   const relevant=calls=>(Array.isArray(calls)?calls:[]).filter(tc=>{
     const rawIdx=tc&&tc.assistant_msg_idx;
     const idx=Number(rawIdx);
@@ -23536,10 +23512,10 @@ function renderMessages(options){
         if(blocks) blocks.innerHTML='';
         for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);
         const role=recycled.querySelector('.msg-role.assistant');
-        if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        if(role) role.outerHTML=_assistantRoleHtml(tsTitle);
         currentAssistantTurn=recycled;
       }else{
-        currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        currentAssistantTurn=_createAssistantTurn(tsTitle);
       }
       currentAssistantTurn.dataset.role='assistant';
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;

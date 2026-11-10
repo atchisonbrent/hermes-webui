@@ -229,7 +229,7 @@ const elements = {
   emptyState: new FakeElement('div'),
   composerTps: new FakeElement('span'),
 };
-global.window = { _showTokenUsage: true, _showThinking: true };
+global.window = { _showTokenUsage: true, _showThinking: true, _showTps: true };
 global.document = {
   createElement: (tag) => new FakeElement(tag),
   getElementById: (id) => elements[id] || null,
@@ -355,7 +355,7 @@ function _assistantTurnVisibleContentMap() { return new Map(); }
 function _isPreservedCompressionTaskListMessage() { return false; }
 function _preservedCompressionTaskListCardsHtml() { return ''; }
 function _isContextCompactionMessage() { return false; }
-function _createAssistantTurn(tsTitle = '', tpsText = '') {
+function _createAssistantTurn(tsTitle = '') {
   const turn = new FakeElement('div');
   turn.className = 'assistant-turn';
   const blocks = new FakeElement('div');
@@ -376,8 +376,7 @@ function _getCachedRender(value) { return String(value || ''); }
 function _formatInServerTz() { return ''; }
 function _formatMessageFooterTimestamp() { return 'STAMP'; }
 function _questionJumpButtonHtml() { return ''; }
-function _formatTurnTps() { return ''; }
-function isTpsDisplayEnabled() { return false; }
+function isTpsDisplayEnabled() { return window._showTps === true; }  // production's predicate
 function _renderAttachmentHtml() { return ''; }
 function _isMarkerOnlyAssistantCompressionMessage() { return false; }
 function _isAssistantEmptyPlaceholderContent() { return false; }
@@ -517,6 +516,18 @@ const composerBeforeMissingUsage = elements.composerTps.textContent;
 _recordTurnGenerationTps(S.messages[currentTurnIndex], undefined);
 _syncComposerTps();
 const composerAfterMissingUsage = elements.composerTps.textContent;
+const composerHiddenAfterMissingUsage = elements.composerTps.hidden;
+_recordTurnGenerationTps(S.messages[currentTurnIndex], 120.0);
+_syncComposerTps();
+const composerHiddenWithRate = elements.composerTps.hidden;
+window._showTps = false;
+_syncComposerTps();
+const composerWithPreferenceOff = elements.composerTps.textContent;
+const composerHiddenWithPreferenceOff = elements.composerTps.hidden;
+delete window._showTps;  // never loaded: the readout stays hidden by default
+_syncComposerTps();
+const composerHiddenWithPreferenceUnset = elements.composerTps.hidden;
+window._showTps = true;
 // Return to the original fixture for the pre-existing footer assertions below.
 // The lightweight shim appends children on innerHTML, so give the original
 // fixture a genuinely fresh DOM container and bypass its earlier cache entry.
@@ -532,6 +543,11 @@ const result = {
   composerAfterStatusCard,
   composerBeforeMissingUsage,
   composerAfterMissingUsage,
+  composerHiddenAfterMissingUsage,
+  composerHiddenWithRate,
+  composerWithPreferenceOff,
+  composerHiddenWithPreferenceOff,
+  composerHiddenWithPreferenceUnset,
   composerAfterToolTurn,
   composerAfterCachedReturn,
   composerAfterLegacyWallTime,
@@ -637,12 +653,17 @@ def test_composer_uses_final_generation_metric_across_render_and_cache_paths():
     result = _run_footer_scenario()
     assert result["composerAfterToolTurn"] == "25.0 tps", result
     assert result["composerAfterCachedReturn"] == "25.0 tps", result
-    assert result["composerAfterLegacyWallTime"] == "—", result
+    assert result["composerAfterLegacyWallTime"] == "", result
     assert result["composerWhileNextTurnStreams"] == "25.0 tps", result
     assert result["composerAfterPlainLocalCommand"] == "25.0 tps", result
     assert result["composerAfterStatusCard"] == "25.0 tps", result
     assert result["composerBeforeMissingUsage"] == "120 tps", result
-    assert result["composerAfterMissingUsage"] == "—", result
+    assert result["composerAfterMissingUsage"] == "", result
+    assert result["composerHiddenAfterMissingUsage"] is True, result
+    assert result["composerHiddenWithRate"] is False, result
+    assert result["composerWithPreferenceOff"] == "", result
+    assert result["composerHiddenWithPreferenceOff"] is True, result
+    assert result["composerHiddenWithPreferenceUnset"] is True, result
 
 
 def test_footer_lookup_is_scoped_to_the_message_segments():

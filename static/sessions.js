@@ -2612,7 +2612,6 @@ async function newSession(flash, options={}){
     updateSendBtn();
     setStatus('');
     setComposerStatus('');
-    if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);
     if(typeof _syncCtxIndicator==='function'){
       _syncCtxIndicator({
         input_tokens:data.session.input_tokens||0,
