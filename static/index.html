@@ -748,7 +748,7 @@
           <div id="savedPromptsPopup" class="saved-prompts-popup" style="display:none" role="menu" aria-label="Saved prompts" data-i18n-aria-label="composer_control_saved_prompts"></div>
           <div class="composer-right">
             <span class="composer-status" id="composerStatus" style="display:none"></span>
-            <span class="composer-tps" id="composerTps" title="Output tokens per second for the latest completed turn, using model-call time only">—</span>
+            <span class="composer-tps" id="composerTps" title="Output tokens per second for the latest completed turn, counting only the time the model spent generating" hidden></span>
             <div class="ctx-indicator-wrap" id="ctxIndicatorWrap" style="display:none">
               <button class="ctx-indicator" id="ctxIndicator" type="button" aria-label="Context window usage" aria-describedby="ctxTooltip">
                 <span class="ctx-ring">
@@ -1381,7 +1381,7 @@
                 <input type="checkbox" id="settingsShowTps" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_token_speed">Show token speed (TPS)</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_token_speed">Displays tokens per second in assistant message headers while streaming and after a response completes. Off by default.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_token_speed">Shows tokens per second for the latest completed turn beside the context indicator, counting only the time the model spent generating. Off by default.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

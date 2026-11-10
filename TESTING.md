@@ -864,18 +864,21 @@ EXPECT:
   - The model dropdown remains usable without overlapping the send button or pushing controls out of view
 FAIL: Linear meter still shown, tooltip missing/incomplete, controls overlap, or footer wraps in a broken way.
 
-### T3.4: Turn TPS Uses Model-Call Time Only
+### T3.4: Turn TPS Counts Only Generating Time
 
-Run `./scripts/test.sh -q tests/test_turn_generation_metrics.py tests/test_composer_turn_tps.py tests/test_gateway_routing_footer_scope.py`.
+Run `./scripts/test.sh -q tests/test_turn_generation_metrics.py tests/test_composer_turn_tps.py tests/test_gateway_routing_footer_scope.py tests/test_issue1617_tps_message_header.py`.
+
+Enable Settings → Preferences → "Show token speed (TPS)" first; with it off the readout is hidden.
 
 1. Complete a turn with multiple model calls separated by a tool command.
-2. Verify `composerTps`, immediately before the context ring, reports the turn's output tokens divided by only the completed model-call durations. Tool and approval wait time and previous turns' output do not contribute.
+2. Verify `composerTps`, immediately before the context ring, reports the turn's output tokens divided by only the time its model calls spent generating. Tool and approval wait time and previous turns' output do not contribute. On an Agent that records `_api_generation_history`, neither does each call's wait for its first stream chunk; on an older Agent each call's whole duration is used.
 3. Verify it remains on the latest completed value between turns and restores from the settled message on reload. A turn without complete provider usage shows no invented fallback rate.
-4. Complete a second turn without complete provider usage. Verify the composer does not attribute the previous turn's TPS to this turn; it shows `—` instead of a wall-clock fallback.
+4. Complete a second turn without complete provider usage. Verify the composer does not attribute the previous turn's TPS to this turn: the readout disappears. It never shows a placeholder such as `—`.
 5. Check an ordinary laptop width and a narrow/mobile width. The readout follows the context ring's responsive visibility and must not force horizontal scrolling.
-6. Verify a tool-interim assistant row followed by a final assistant restores the final row's `_turnGenerationTps` through a normal render, a cached-session return, and an older-message render. Older `_turnTps` wall-clock values alone must not populate the composer. Plain local-command output and status-card rows are unmarked and must preserve the previous completed rate; a real turn with `_turnGenerationRecorded` but no valid generation rate must show `—`.
+6. Verify a tool-interim assistant row followed by a final assistant restores the final row's `_turnGenerationTps` through a normal render, a cached-session return, and an older-message render. Older `_turnTps` wall-clock values alone must not populate the composer. Plain local-command output and status-card rows are unmarked and must preserve the previous completed rate; a real turn with `_turnGenerationRecorded` but no valid generation rate must hide the readout.
+7. Verify the assistant message header shows no TPS chip, while streaming or after the turn settles.
 
-Expected format: `120 tps`. The composer is independent of the older opt-in assistant-header TPS preference. The header retains its placement and `t/s` formatting, but valid current-turn values there intentionally use the same generation-only measurement as `usage.tps`; incomplete provider history is unavailable rather than the former wall-clock estimate.
+Expected format: `120 tps`. The composer readout is the only TPS display; the assistant-header chip and its live metering value were removed.
 
 ---
 

@@ -7515,11 +7515,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _syncCtxIndicator(S.lastUsage);
           }
         }
-        if(d.estimated===true||d.tps_available!==true||typeof d.tps!=='number'||d.tps<=0){
-          if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);
-          return;
-        }
-        if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(d.tps);
       }catch(_){}
     });
 

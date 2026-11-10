@@ -31,10 +31,15 @@ Usage from api/streaming.py
   meter().record_token(stream_id, running_output_deltas)
   meter().record_reasoning(stream_id, running_reasoning_deltas)
 
+The WebUI frontend no longer renders any of the tps fields below (its only tps
+readout is the per-turn rate in the composer, api/turn_metrics.py); it reads
+`usage` from this event for the context indicator. The fields stay in the
+payload for other consumers of the stream.
+
 The SSE `metering` event payload:
   {
     "tps": 47.3,              # omitted/null until a real reading exists
-    "tps_available": true,    # frontend must hide TPS when false
+    "tps_available": true,    # false: no real reading; never display one
     "estimated": false,       # never show byte/character-size estimates
     "high": 52.1,
     "low":  31.4,

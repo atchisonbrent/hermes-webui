@@ -87,9 +87,7 @@ const appendRenderedNode = node => inner.appendChild(node);
 const tsTitle = 'Turn title';
 const m = { _turnTps: 42 };
 const S = { session: { session_id: 'sess-1' } };
-const _assistantRoleHtml = (title, tps) => `role:${title}:${tps}`;
-const isTpsDisplayEnabled = () => true;
-const _formatTurnTps = value => `tps:${value}`;
+const _assistantRoleHtml = (title, ...rest) => `role:${title}:args=${1 + rest.length}`;
 const latestRenderedAssistantRawIdx = rawIdx;
 function _setLatestAssistantTurnLandmark() {}
 eval(recycleChunk);
@@ -159,9 +157,7 @@ const appendRenderedNode = node => inner.appendChild(node);
 const tsTitle = 'Turn title';
 const m = { _turnTps: 42 };
 const S = { session: { session_id: 'sess-1' } };
-const _assistantRoleHtml = (title, tps) => `role:${title}:${tps}`;
-const isTpsDisplayEnabled = () => true;
-const _formatTurnTps = value => `tps:${value}`;
+const _assistantRoleHtml = (title, ...rest) => `role:${title}:args=${1 + rest.length}`;
 const latestRenderedAssistantRawIdx = rawIdx;
 function _setLatestAssistantTurnLandmark() {}
 eval(recycleChunk);
@@ -179,7 +175,8 @@ console.log(JSON.stringify({
     result = _run_node(script)
 
     assert result["blocksInnerHTML"] == ""
-    assert result["roleHtml"] == "role:Turn title:tps:42"
+    # The recycled header is refreshed from the title alone: no TPS text rides along.
+    assert result["roleHtml"] == "role:Turn title:args=1"
     assert result["currentAssistantTurnIsRecycled"] is True
     assert result["dataset"] == {
         "role": "assistant",

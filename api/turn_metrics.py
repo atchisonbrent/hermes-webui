@@ -1,4 +1,13 @@
-"""Generation-only throughput derived from the Agent's paired API histories."""
+"""Generation-only throughput derived from the Agent's paired API histories.
+
+The Agent appends one entry per completed model call to each history: the call's
+duration, its output tokens and, on Agents that record it, the seconds between
+the call's first stream chunk and its end. A turn's rate is its output tokens
+over the time its calls spent generating. Tool execution, approval and clarify
+waits happen between calls and never enter that time; with the third history,
+neither does the wait for a call's first chunk (queueing, prompt processing,
+failed attempts and their backoff).
+"""
 
 from __future__ import annotations
 
@@ -15,6 +24,8 @@ class GenerationHistoryStart:
     latencies: tuple[float, ...]
     outputs: tuple[int, ...]
     api_calls: int
+    # None when the Agent does not record per-call streaming time.
+    generations: tuple[float, ...] | None = None
     owner: Any = field(default=None, repr=False, compare=False)
     history_maxlens: tuple[tuple[str, int], ...] = ()
     # False when the baseline could not be taken: no rate is shown for the turn.
@@ -34,6 +45,14 @@ MAX_TURN_HISTORY_CALLS = 10_000
 _HISTORY_STATE_ATTRIBUTE = '_webui_generation_history_state'
 _HISTORY_STATE_LOCK = threading.RLock()
 _HISTORY_FIELDS = ('_api_latency_history', '_api_output_history')
+# Recorded only by newer Agents; tracked when present, never created here.
+_GENERATION_HISTORY_FIELD = '_api_generation_history'
+
+# A call whose tokens all arrive in one burst (a buffering proxy, a provider
+# that sends the whole reply at once) has a streaming window near zero, which
+# would report an absurd rate. Above this ceiling the window is not believed
+# and the call's whole duration is used instead.
+MAX_PLAUSIBLE_CALL_TPS = 5_000.0
 
 
 def _turn_call_allowance(agent: Any) -> int:
@@ -68,6 +87,9 @@ def begin_turn_generation_history(agent: Any) -> GenerationHistoryStart:
                 original_maxlen = getattr(prior, 'maxlen', None)
                 cap = original_maxlen if isinstance(original_maxlen, int) and original_maxlen > 0 else 10
                 history_maxlens.append((name, cap))
+            generation_maxlen = getattr(getattr(agent, _GENERATION_HISTORY_FIELD, None), 'maxlen', None)
+            if isinstance(generation_maxlen, int) and generation_maxlen > 0:
+                history_maxlens.append((_GENERATION_HISTORY_FIELD, generation_maxlen))
             state = {
                 'history_maxlens': tuple(history_maxlens),
                 'active_starts': set(),
@@ -76,6 +98,10 @@ def begin_turn_generation_history(agent: Any) -> GenerationHistoryStart:
         history_maxlens = state['history_maxlens']
         latencies = list(getattr(agent, '_api_latency_history', ()) or ())
         outputs = list(getattr(agent, '_api_output_history', ()) or ())
+        tracks_generation = any(name == _GENERATION_HISTORY_FIELD for name, _ in history_maxlens)
+        generations = (
+            tuple(getattr(agent, _GENERATION_HISTORY_FIELD, ()) or ()) if tracks_generation else None
+        )
         # Do not let an earlier turn's restore trim a newer concurrent turn.
         # A new turn still inherits the TRUE original cap from the shared state.
         # Build everything before touching the agent, so a failure here leaves
@@ -88,6 +114,7 @@ def begin_turn_generation_history(agent: Any) -> GenerationHistoryStart:
             latencies=tuple(latencies),
             outputs=tuple(outputs),
             api_calls=int(getattr(agent, 'session_api_calls', 0) or 0),
+            generations=generations,
             owner=agent,
             history_maxlens=history_maxlens,
         )
@@ -152,7 +179,7 @@ def _suffix_since(before: tuple, current: list | None) -> list | None:
 
 
 def turn_tps_from_generation_history(agent: Any, start: GenerationHistoryStart) -> float | None:
-    """Weighted output tokens / completed model-call seconds for one turn.
+    """Output tokens / seconds spent generating, over one turn's model calls.
 
     ``None`` means the provider's usage history cannot account for every
     call, so no rate is shown instead of falling back to turn wall time.
@@ -183,8 +210,36 @@ def _turn_tps(agent: Any, start: GenerationHistoryStart) -> float | None:
     ):
         return None
 
-    generation_seconds = math.fsum(latencies)
+    seconds = _generating_seconds(agent, start, latencies, outputs)
+    generation_seconds = math.fsum(seconds)
     output_tokens = sum(outputs)
     if generation_seconds <= 0 or output_tokens <= 0:
         return None
     return round(output_tokens / generation_seconds, 1)
+
+
+def _generating_seconds(
+    agent: Any, start: GenerationHistoryStart, latencies: list, outputs: list
+) -> list:
+    """Per-call seconds spent generating: the streaming window where trusted.
+
+    Falls back to the call's whole duration for any call whose window is
+    missing, outside its duration, or too short for its tokens to be real.
+    """
+    if start.generations is None:
+        return latencies
+    windows = _suffix_since(
+        start.generations, list(getattr(agent, _GENERATION_HISTORY_FIELD, ()) or ())
+    )
+    if windows is None or len(windows) != len(latencies):
+        return latencies
+    seconds = []
+    for latency, window, tokens in zip(latencies, windows, outputs, strict=True):
+        trusted = (
+            isinstance(window, (int, float))
+            and not isinstance(window, bool)
+            and 0 < window <= latency
+            and tokens <= window * MAX_PLAUSIBLE_CALL_TPS
+        )
+        seconds.append(window if trusted else latency)
+    return seconds

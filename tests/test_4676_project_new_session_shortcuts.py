@@ -175,7 +175,7 @@ for (const name of [
   'clearLiveToolCards', 'setComposerStatus', 'setStatus', 'updateSendBtn',
   'syncTopbar', 'renderMessages', 'startSessionStream', '_setSessionViewedCount',
   '_setActiveSessionUrl', '_rememberNewChatDraftSession', '_hydrateTodosFromSession',
-  '_setLiveAssistantTps', '_syncCtxIndicator', 'showToast'
+  '_syncCtxIndicator', 'showToast'
 ]) {
   globalThis[name] = () => {};
 }
