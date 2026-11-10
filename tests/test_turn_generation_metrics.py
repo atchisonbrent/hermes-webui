@@ -249,3 +249,20 @@ def test_rate_computation_failure_reports_no_rate():
         assert turn_tps_from_generation_history(agent, start) is None
     finally:
         restore_turn_generation_history(start)
+
+
+def test_restoring_an_unavailable_baseline_does_not_trim_a_concurrent_turn():
+    agent = _agent()
+    live = begin_turn_generation_history(agent)
+    widened = agent._api_latency_history.maxlen
+    agent.session_api_calls = 'not-a-number'
+    failed = track_turn_generation_history(agent, [])
+    assert not failed.available
+    agent.session_api_calls = 2
+
+    restore_turn_generation_history(failed)
+
+    assert agent._api_latency_history.maxlen == widened
+    assert agent._api_output_history.maxlen == widened
+    restore_turn_generation_history(live)
+    assert agent._api_latency_history.maxlen == 2

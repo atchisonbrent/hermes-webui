@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 # Extra paired-history entries retained for one turn. AIAgent's default
 # iteration budget is ``sys.maxsize`` ("unlimited"), which is not a usable
 # ``deque`` maxlen (it must fit a C ssize_t once the rolling cap is added) and
-# would not be a bound at all. A turn that makes more model calls than this
-# loses its first entries and reports no rate, never a partial one.
+# would not be a bound at all. Once a turn's calls no longer fit beside the
+# rolling cap, its earliest calls are evicted and it reports no rate, never a
+# partial one.
 MAX_TURN_HISTORY_CALLS = 10_000
 
 _HISTORY_STATE_ATTRIBUTE = '_webui_generation_history_state'
