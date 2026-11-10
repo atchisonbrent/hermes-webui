@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from collections import deque
@@ -16,11 +17,35 @@ class GenerationHistoryStart:
     api_calls: int
     owner: Any = field(default=None, repr=False, compare=False)
     history_maxlens: tuple[tuple[str, int], ...] = ()
+    # False when the baseline could not be taken: no rate is shown for the turn.
+    available: bool = True
 
+
+logger = logging.getLogger(__name__)
+
+# Extra paired-history entries retained for one turn. AIAgent's default
+# iteration budget is ``sys.maxsize`` ("unlimited"), which is not a usable
+# ``deque`` maxlen (it must fit a C ssize_t once the rolling cap is added) and
+# would not be a bound at all. Once a turn's calls no longer fit beside the
+# rolling cap, its earliest calls are evicted and it reports no rate, never a
+# partial one.
+MAX_TURN_HISTORY_CALLS = 10_000
 
 _HISTORY_STATE_ATTRIBUTE = '_webui_generation_history_state'
 _HISTORY_STATE_LOCK = threading.RLock()
 _HISTORY_FIELDS = ('_api_latency_history', '_api_output_history')
+
+
+def _turn_call_allowance(agent: Any) -> int:
+    """Model calls one turn may retain: the iteration budget, bounded."""
+    try:
+        budget = int(getattr(agent, "max_iterations", 1) or 1)
+    except OverflowError:
+        # float('inf') is another spelling of "unlimited".
+        budget = MAX_TURN_HISTORY_CALLS
+    except (TypeError, ValueError):
+        budget = 1
+    return max(1, min(budget, MAX_TURN_HISTORY_CALLS))
 
 
 def begin_turn_generation_history(agent: Any) -> GenerationHistoryStart:
@@ -31,14 +56,12 @@ def begin_turn_generation_history(agent: Any) -> GenerationHistoryStart:
     display policy, but retain a bounded extra turn's worth here so no current
     call disappears from the generation-time denominator.
     """
-    try:
-        max_calls = max(1, int(getattr(agent, "max_iterations", 1) or 1))
-    except (TypeError, ValueError):
-        max_calls = 1
+    max_calls = _turn_call_allowance(agent)
 
     with _HISTORY_STATE_LOCK:
         state = getattr(agent, _HISTORY_STATE_ATTRIBUTE, None)
-        if not isinstance(state, dict):
+        is_first_active_turn = not isinstance(state, dict)
+        if is_first_active_turn:
             history_maxlens = []
             for name in _HISTORY_FIELDS:
                 prior = getattr(agent, name, None)
@@ -49,16 +72,18 @@ def begin_turn_generation_history(agent: Any) -> GenerationHistoryStart:
                 'history_maxlens': tuple(history_maxlens),
                 'active_starts': set(),
             }
-            setattr(agent, _HISTORY_STATE_ATTRIBUTE, state)
 
         history_maxlens = state['history_maxlens']
         latencies = list(getattr(agent, '_api_latency_history', ()) or ())
         outputs = list(getattr(agent, '_api_output_history', ()) or ())
         # Do not let an earlier turn's restore trim a newer concurrent turn.
         # A new turn still inherits the TRUE original cap from the shared state.
-        for name, cap in history_maxlens:
-            values = list(getattr(agent, name, ()) or ())
-            setattr(agent, name, deque(values, maxlen=cap + max_calls))
+        # Build everything before touching the agent, so a failure here leaves
+        # its histories and caps exactly as they were.
+        widened = [
+            (name, deque(list(getattr(agent, name, ()) or ()), maxlen=cap + max_calls))
+            for name, cap in history_maxlens
+        ]
         start = GenerationHistoryStart(
             latencies=tuple(latencies),
             outputs=tuple(outputs),
@@ -66,6 +91,10 @@ def begin_turn_generation_history(agent: Any) -> GenerationHistoryStart:
             owner=agent,
             history_maxlens=history_maxlens,
         )
+        for name, history in widened:
+            setattr(agent, name, history)
+        if is_first_active_turn:
+            setattr(agent, _HISTORY_STATE_ATTRIBUTE, state)
         state['active_starts'].add(id(start))
         return start
 
@@ -77,7 +106,15 @@ def track_turn_generation_history(
     for start in starts:
         if start.owner is agent:
             return start
-    start = begin_turn_generation_history(agent)
+    try:
+        start = begin_turn_generation_history(agent)
+    except Exception:
+        # The rate is a display nicety; failing to prepare it must never fail
+        # the turn. Record an unavailable baseline so nothing is shown.
+        logger.warning('Turn generation history unavailable; no rate for this turn', exc_info=True)
+        start = GenerationHistoryStart(
+            latencies=(), outputs=(), api_calls=0, owner=agent, available=False
+        )
     starts.append(start)
     return start
 
@@ -120,6 +157,16 @@ def turn_tps_from_generation_history(agent: Any, start: GenerationHistoryStart) 
     ``None`` means the provider's usage history cannot account for every
     call, so no rate is shown instead of falling back to turn wall time.
     """
+    if not start.available:
+        return None
+    try:
+        return _turn_tps(agent, start)
+    except Exception:
+        logger.warning('Turn generation rate could not be computed', exc_info=True)
+        return None
+
+
+def _turn_tps(agent: Any, start: GenerationHistoryStart) -> float | None:
     latencies = _suffix_since(
         start.latencies, list(getattr(agent, "_api_latency_history", ()) or ())
     )
