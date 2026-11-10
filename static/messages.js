@@ -2569,6 +2569,19 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
   }
 }
 
+function _recordTurnGenerationTps(message, value){
+  if(!message) return false;
+  message._turnGenerationRecorded=true;
+  const tps=Number(value);
+  if(Number.isFinite(tps)&&tps>0){
+    message._turnTps=tps;
+    message._turnGenerationTps=tps;
+    return true;
+  }
+  delete message._turnGenerationTps;
+  return false;
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
@@ -7224,9 +7237,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               if(typeof d.usage.duration_seconds==='number'){
                 lastAsst._turnDuration=d.usage.duration_seconds;
               }
-              if(typeof d.usage.tps==='number'&&d.usage.tps>0){
-                lastAsst._turnTps=d.usage.tps;
-              }
               if(d.usage.gateway_routing){
                 lastAsst._gatewayRouting=d.usage.gateway_routing;
                 if(S.session)S.session.gateway_routing=d.usage.gateway_routing;
@@ -7236,6 +7246,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           }
           _attachProjectedAnchorSceneToLastAssistant(S.messages);
+          if(typeof _recordTurnGenerationTps==='function') _recordTurnGenerationTps(lastAsst,d.usage&&d.usage.tps);
+          if(typeof _syncComposerTps==='function') _syncComposerTps();
           const hasMessageToolMetadata=S.messages.some(m=>{
             if(!m||m.role!=='assistant') return false;
             const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -7870,7 +7882,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_turnGenerationTps','_turnGenerationRecorded','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
   function _isHistoricalAnchorActivityScene(scene){
     if(!scene||typeof scene!=='object') return false;
     const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;

@@ -96,6 +96,8 @@ function buildRuntime() {
     '_turnUsage',
     '_turnDuration',
     '_turnTps',
+    '_turnGenerationTps',
+    '_turnGenerationRecorded',
     '_gatewayRouting',
     '_statusCard',
     '_anchor_stream_id',

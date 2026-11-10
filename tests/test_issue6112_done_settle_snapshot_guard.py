@@ -127,7 +127,7 @@ def _harness(extra: str = "") -> dict:
         _extract_function(MESSAGES_JS, "_streamRecoveryControlMessageText"),
         _extract_function(MESSAGES_JS, "_streamRecoveryControlMessage"),
         _extract_function(MESSAGES_JS, "_isMarkerOnlyAssistantMessage"),
-        "const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];",
+        "const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_turnGenerationTps','_turnGenerationRecorded','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];",
         _extract_function(MESSAGES_JS, "_isHistoricalAnchorActivityScene"),
         "function msgContent(m){return (m && m.content)||'';}",
         "function _isPreservedCompressionTaskListMarkerOnlyText(t){return /active task list was preserved/i.test(String(t||''));}",
@@ -404,7 +404,7 @@ def _listener_settle_harness(prev_messages: str, done_session: str, final_answer
         _extract_function(MESSAGES_JS, "_streamRecoveryControlMessage"),
         _extract_function(MESSAGES_JS, "_isMarkerOnlyAssistantMessage"),
         _extract_function(MESSAGES_JS, "_filterRecoveryControlMessages"),
-        "const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];",
+        "const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_turnGenerationTps','_turnGenerationRecorded','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];",
         _extract_function(MESSAGES_JS, "_isHistoricalAnchorActivityScene"),
         # A minimal msgContent so _isMarkerOnlyAssistantMessage/_streamRecoveryControlMessage run.
         "function msgContent(m){return (m && m.content)||'';}",

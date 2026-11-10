@@ -33,10 +33,12 @@ REPO = Path(__file__).resolve().parents[1]
 UI_JS_PATH = REPO / "static" / "ui.js"
 
 
-def _function_source(name: str) -> str:
-    """Extract a top-level ``function name(...)`` body from static/ui.js."""
-    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+def _function_source(name: str, *, optional: bool = False, source: Path = UI_JS_PATH) -> str:
+    """Extract a top-level function, optionally supplying a pre-feature stub."""
+    ui_js = source.read_text(encoding="utf-8")
     start = ui_js.find(f"function {name}(")
+    if start == -1 and optional:
+        return f"function {name}() {{}}"
     assert start != -1, f"function {name}() not found in static/ui.js"
     brace = ui_js.index("{", start)
     depth = 0
@@ -225,6 +227,7 @@ function parseHtmlInto(parent, html) {
 const elements = {
   msgInner: new FakeElement('div'),
   emptyState: new FakeElement('div'),
+  composerTps: new FakeElement('span'),
 };
 global.window = { _showTokenUsage: true, _showThinking: true };
 global.document = {
@@ -435,6 +438,8 @@ function _formatTurnDuration(value) { return value ? 'DURATION' : ''; }
 function _fmtTokens(value) { return String(value); }
 
 /*RAW_TURN_BOUNDARY*/
+/*COMPOSER_TPS*/
+/*RECORD_GENERATION_TPS*/
 /*INSERT_SEGMENT_BLOCK*/
 /*ASSISTANT_SEGMENT_IS_TURN_FINAL*/
 /*RENDER_MESSAGES*/
@@ -468,14 +473,68 @@ S = {
       _gatewayRouting: { used_model: 'a/m1' },
       _turnDuration: { elapsed_seconds: 2 },
       _turnUsage: { input_tokens: 5, output_tokens: 3 },
+      _turnTps: 42,
+      _turnGenerationTps: 25.0,
+      _turnGenerationRecorded: true,
     },
   ],
   toolCalls: [],
   busy: false,
 };
+const scenarioMessages = [...S.messages];
+renderMessages();
+const composerAfterToolTurn = elements.composerTps.textContent;
+S.session.session_id = 's2';
+renderMessages();
+_sessionHtmlCache.set('s1', { msgCount: 3, renderWindowKey: 'all', html: '', signature: 'sig' });
+_sessionHtmlCacheSid = 's2';
+S.session.session_id = 's1';
+S.messages = scenarioMessages;
+renderMessages();
+const composerAfterCachedReturn = elements.composerTps.textContent;
+S.session.session_id = 's3';
+S.messages = [{ role: 'user', content: 'legacy' }, { role: 'assistant', content: 'old wall time', _turnTps: 8400 }];
+renderMessages();
+const composerAfterLegacyWallTime = elements.composerTps.textContent;
+S.messages = [
+  { role: 'assistant', content: 'completed', _turnGenerationTps: 25.0, _turnGenerationRecorded: true },
+  { role: 'user', content: 'next turn' },
+  { role: 'assistant', content: 'streaming', _live: true },
+];
+renderMessages();
+const composerWhileNextTurnStreams = elements.composerTps.textContent;
+const currentTurnIndex = S.messages.length - 1;
+S.messages.push({role:'assistant',content:'Title set: example',_ts:Date.now()/1000});
+renderMessages();
+const composerAfterPlainLocalCommand = elements.composerTps.textContent;
+S.messages.push({role:'assistant',content:'',_ephemeral:true,_statusCard:{title:'Status'},_ts:Date.now()/1000});
+renderMessages();
+const composerAfterStatusCard = elements.composerTps.textContent;
+_recordTurnGenerationTps(S.messages[currentTurnIndex], 120.0);
+S.messages[currentTurnIndex]._live = false;
+_syncComposerTps();
+const composerBeforeMissingUsage = elements.composerTps.textContent;
+_recordTurnGenerationTps(S.messages[currentTurnIndex], undefined);
+_syncComposerTps();
+const composerAfterMissingUsage = elements.composerTps.textContent;
+// Return to the original fixture for the pre-existing footer assertions below.
+// The lightweight shim appends children on innerHTML, so give the original
+// fixture a genuinely fresh DOM container and bypass its earlier cache entry.
+elements.msgInner = new FakeElement('div');
+_sessionHtmlCache.delete('s1');
+S.session.session_id = 's1';
+S.messages = scenarioMessages;
 renderMessages();
 
 const result = {
+  composerWhileNextTurnStreams,
+  composerAfterPlainLocalCommand,
+  composerAfterStatusCard,
+  composerBeforeMissingUsage,
+  composerAfterMissingUsage,
+  composerAfterToolTurn,
+  composerAfterCachedReturn,
+  composerAfterLegacyWallTime,
   interim: footCounts(footFor(1)),
   final: footCounts(footFor(2)),
   turnWarningTotal: elements.msgInner.querySelectorAll('.msg-model-warning-inline').length,
@@ -497,6 +556,16 @@ def _run_footer_scenario() -> dict:
         .replace(
             "/*ASSISTANT_SEGMENT_IS_TURN_FINAL*/",
             _function_source("_assistantSegmentIsTurnFinal"),
+        )
+        .replace(
+            "/*COMPOSER_TPS*/",
+            _function_source("_setComposerTps")
+            + "\n"
+            + _function_source("_syncComposerTps", optional=True),
+        )
+        .replace(
+            "/*RECORD_GENERATION_TPS*/",
+            _function_source("_recordTurnGenerationTps", optional=True, source=REPO / "static" / "messages.js"),
         )
         .replace("/*RENDER_MESSAGES*/", _function_source("renderMessages"))
     )
@@ -562,6 +631,18 @@ def test_turn_level_warnings_render_once_on_the_final_segment():
     assert result["final"]["failover"] == 1, result
     assert result["interim"]["warning"] == 0, result
     assert result["interim"]["failover"] == 0, result
+
+
+def test_composer_uses_final_generation_metric_across_render_and_cache_paths():
+    result = _run_footer_scenario()
+    assert result["composerAfterToolTurn"] == "25.0 tps", result
+    assert result["composerAfterCachedReturn"] == "25.0 tps", result
+    assert result["composerAfterLegacyWallTime"] == "—", result
+    assert result["composerWhileNextTurnStreams"] == "25.0 tps", result
+    assert result["composerAfterPlainLocalCommand"] == "25.0 tps", result
+    assert result["composerAfterStatusCard"] == "25.0 tps", result
+    assert result["composerBeforeMissingUsage"] == "120 tps", result
+    assert result["composerAfterMissingUsage"] == "—", result
 
 
 def test_footer_lookup_is_scoped_to_the_message_segments():

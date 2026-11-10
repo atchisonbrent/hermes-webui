@@ -85,6 +85,11 @@ from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
+from api.turn_metrics import (
+    restore_turn_generation_history,
+    track_turn_generation_history,
+    turn_tps_from_generation_history,
+)
 from api.usage import prompt_cache_hit_percent
 from api.memory_profile_scope import (
     agent_has_memory,
@@ -14281,6 +14286,7 @@ def _run_agent_streaming(
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
+    _generation_history_starts = []
     cancel_event = threading.Event()
     q = peek_stream(stream_id)
     draining = False
@@ -16505,6 +16511,7 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
+            _generation_history_start = track_turn_generation_history(agent, _generation_history_starts)
             _external_state_snapshot = get_state_db_session_messages(
                 session_id,
                 profile=getattr(s, 'profile', None),
@@ -17235,6 +17242,7 @@ def _run_agent_streaming(
                                 agent_params=_agent_params, session_id=session_id,
                                 fail_closed_reason=_turn_memory_reason,
                             )
+                            _generation_history_start = track_turn_generation_history(agent, _generation_history_starts)
                             _agent_sig = _compute_agent_cache_signature(
                                 resolved_model,
                                 resolved_api_key,
@@ -17772,9 +17780,9 @@ def _run_agent_streaming(
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
                 except Exception:
                     _turn_duration_seconds = 0.0
-                _turn_tps = None
-                if output_tokens and _turn_duration_seconds > 0:
-                    _turn_tps = round(float(output_tokens) / _turn_duration_seconds, 1)
+                # Generation-only TPS for THIS turn: model-call durations only,
+                # never tool execution, approval waits, or cumulative session output.
+                _turn_tps = turn_tps_from_generation_history(agent, _generation_history_start)
                 _gateway_routing = _extract_gateway_routing_metadata(
                     agent,
                     result,
@@ -17838,8 +17846,10 @@ def _run_agent_streaming(
                     for _dm in reversed(_label_rows):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
                             _dm['_turnDuration'] = round(_turn_duration_seconds, 3)
+                            _dm['_turnGenerationRecorded'] = True
                             if _turn_tps is not None:
                                 _dm['_turnTps'] = _turn_tps
+                                _dm['_turnGenerationTps'] = _turn_tps
                             if _gateway_routing:
                                 _dm['_gatewayRouting'] = _gateway_routing
                             _ttft_ms = meter().get_ttft_ms(stream_id)
@@ -18778,6 +18788,7 @@ def _run_agent_streaming(
                     # Delta callbacks close over `agent`; the replacement, not
                     # the failed original, owns any successful retry output.
                     agent = _heal_agent
+                    _generation_history_start = track_turn_generation_history(agent, _generation_history_starts)
                     _agent_sig = _compute_agent_cache_signature(
                         resolved_model,
                         resolved_api_key,
@@ -19139,6 +19150,11 @@ def _run_agent_streaming(
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
     finally:
+        for _generation_start in reversed(_generation_history_starts):
+            try:
+                restore_turn_generation_history(_generation_start)
+            except Exception:
+                logger.debug('Failed to restore generation history for stream %s', stream_id, exc_info=True)
         _settle_pending_steer()
         # #4633/#2476: symmetric metering teardown. begin_session() (top of the
         # outer try) had no paired end_session(), so zero-token turns leaked a
